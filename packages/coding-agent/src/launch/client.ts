@@ -5,10 +5,12 @@ import * as path from "node:path";
 import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
-import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
+import { daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
+import { canonicalDaemonScope, resolveDaemonScope } from "./scope";
 import {
 	DAEMON_BROKER_WORKER_ARG,
 	DAEMON_IDLE_GRACE_ENV,
+	DAEMON_ORIGIN_DIR_ENV,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
@@ -135,6 +137,7 @@ function openSocket(endpoint: string, timeoutMs: number): Promise<net.Socket> {
 class SocketDaemonClient implements DaemonBrokerClient {
 	readonly projectDir: string;
 	readonly #runtimeDir: string;
+	readonly #originDir: string;
 	readonly #endpoint: string;
 	readonly #token: string;
 	readonly #seenCompletionIds = new Set<string>();
@@ -152,8 +155,15 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#closed = false;
 	#completionReconnectTimer: NodeJS.Timeout | undefined;
 
-	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
+	constructor(
+		projectDir: string,
+		originDir: string,
+		runtimeDir: string,
+		token: string,
+		options: DaemonBrokerClientOptions,
+	) {
 		this.projectDir = projectDir;
+		this.#originDir = originDir;
 		this.#runtimeDir = runtimeDir;
 		this.#endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
 		this.#token = token;
@@ -309,6 +319,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const spawn = resolveWorkerSpawnCmd(DAEMON_BROKER_WORKER_ARG);
 		const overlay: Record<string, string> = {
 			[DAEMON_PROJECT_DIR_ENV]: this.projectDir,
+			[DAEMON_ORIGIN_DIR_ENV]: this.#originDir,
 			[DAEMON_RUNTIME_DIR_ENV]: this.#runtimeDir,
 		};
 		if (this.#idleGraceMs !== undefined) overlay[DAEMON_IDLE_GRACE_ENV] = String(this.#idleGraceMs);
@@ -469,16 +480,26 @@ export async function createDaemonBrokerClient(
 	projectDir: string,
 	options: DaemonBrokerClientOptions = {},
 ): Promise<DaemonBrokerClient> {
-	const canonical = await canonicalProjectDir(projectDir);
-	const runtimeDir = options.runtimeDir ?? daemonRuntimeDir(canonical);
+	// `options.runtimeDir` fixes the scope identity independent of `daemon.scope`
+	// (global broker via `daemonClientForGlobal`, `ps-data.ts` scopeClient re-inspecting
+	// a discovered runtime dir), so resolve without the settings-dependent scope mode.
+	const scope =
+		options.runtimeDir !== undefined ? await canonicalDaemonScope(projectDir) : await resolveDaemonScope(projectDir);
+	const runtimeDir = options.runtimeDir ?? daemonRuntimeDir(scope.scopeDir);
 	const token = await readOrCreateToken(runtimeDir);
-	return new SocketDaemonClient(canonical, runtimeDir, token, options);
+	return new SocketDaemonClient(scope.scopeDir, scope.originDir, runtimeDir, token, options);
 }
 
 /** Get the process-shared daemon broker client for one canonical project directory. */
 export async function daemonClientForProject(projectDir: string): Promise<DaemonBrokerClient> {
-	const canonical = await canonicalProjectDir(projectDir);
-	return sharedDaemonClient(`project:${canonical}`, () => createDaemonBrokerClient(canonical));
+	const scope = await resolveDaemonScope(projectDir);
+	// Cache by scope, not by the caller's own dir, so every worktree in one
+	// process shares a single client — but create() re-resolves from
+	// `projectDir` (not `scope.scopeDir`) so the first caller to populate this
+	// cache entry is the one whose directory the spawned broker records as
+	// `originDir` (`resolveDaemonScope` is idempotent, so a losing racer's
+	// discarded resolution costs nothing).
+	return sharedDaemonClient(`project:${scope.scopeDir}`, () => createDaemonBrokerClient(projectDir));
 }
 
 /** Get the process-shared client that leases one profile-independent, machine-global daemon broker. */

@@ -60,6 +60,7 @@ import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
+import { resolveDaemonScope } from "./launch/scope";
 import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
@@ -1807,7 +1808,9 @@ export async function runRootCommand(
 		}
 		await pluginPreloadPromise;
 		if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
-			await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
+			await logger.time("registerDaemonProjectPresence", async () =>
+				registerDaemonProjectPresence(await resolveDaemonScope(cwd)),
+			);
 		}
 
 		scheduleMarketplaceAutoUpdate({

@@ -2,7 +2,8 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
-import { canonicalProjectDir, daemonRuntimeDir } from "./paths";
+import { daemonRuntimeDir } from "./paths";
+import type { DaemonScope } from "./scope";
 
 const CLIENTS_DIR = "clients";
 const BROKER_PID_FILE = "broker.pid";
@@ -14,7 +15,7 @@ const BROKER_PID_FILE = "broker.pid";
  */
 const DAEMONS_DIR = "daemons";
 /**
- * Name shape of a project daemon scope: the 16-hex wyhash of the project dir
+ * Name shape of a project daemon scope: the 16-hex wyhash of the scope dir
  * produced by `getDaemonRuntimeDir`. Only entries matching this are pruned,
  * which excludes the machine-global `global` container and any foreign dir.
  */
@@ -34,16 +35,18 @@ export interface DaemonProjectPresence {
 
 /** Register this omp process so project daemons survive while it remains alive. */
 export async function registerDaemonProjectPresence(
-	projectDir: string,
+	scope: DaemonScope,
 	runtimeOverride?: string,
 ): Promise<DaemonProjectPresence> {
-	const canonical = await canonicalProjectDir(projectDir);
-	const runtimeDir = runtimeOverride ?? daemonRuntimeDir(canonical);
+	const runtimeDir = runtimeOverride ?? daemonRuntimeDir(scope.scopeDir);
 	const clientsDir = path.join(runtimeDir, CLIENTS_DIR);
 	await fs.mkdir(clientsDir, { recursive: true, mode: 0o700 });
 	const id = `${process.pid}-${crypto.randomUUID()}`;
 	const presencePath = path.join(clientsDir, `${id}.json`);
-	await Bun.write(presencePath, JSON.stringify({ pid: process.pid, id, projectDir: canonical }));
+	await Bun.write(
+		presencePath,
+		JSON.stringify({ pid: process.pid, id, projectDir: scope.scopeDir, originDir: scope.originDir }),
+	);
 	await fs.chmod(presencePath, 0o600);
 	let closed = false;
 	const close = async (): Promise<void> => {

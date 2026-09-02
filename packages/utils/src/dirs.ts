@@ -954,10 +954,14 @@ export function getDaemonRuntimeRoot(): string {
 	return dirs.rootSubdir(path.join("run", "daemons"), "state");
 }
 
-/** Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
-export function getDaemonRuntimeDir(projectDir: string): string {
-	const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
-	return path.join(getDaemonRuntimeRoot(), key);
+/** 16-hex wyhash naming one daemon scope: its runtime dir and its Windows pipe. */
+export function daemonScopeKey(scopeDir: string): string {
+	return Bun.hash.wyhash(path.resolve(scopeDir)).toString(16).padStart(16, "0");
+}
+
+/** Get the daemon runtime directory for a scope (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
+export function getDaemonRuntimeDir(scopeDir: string): string {
+	return path.join(getDaemonRuntimeRoot(), daemonScopeKey(scopeDir));
 }
 
 /** Root directory containing every machine-global daemon service scope. */

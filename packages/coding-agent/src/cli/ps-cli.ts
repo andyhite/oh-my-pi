@@ -12,6 +12,7 @@
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { Settings } from "../config/settings";
 import {
 	closeDaemonClients,
 	type DaemonBrokerClient,
@@ -63,6 +64,15 @@ export interface PsCommandArgs {
 
 export async function runPsCommand(cmd: PsCommandArgs): Promise<void> {
 	try {
+		try {
+			await Settings.init({ cwd: cmd.flags.dir ?? getProjectDir() });
+		} catch (error) {
+			process.stderr.write(
+				chalk.dim(
+					`settings unavailable, assuming daemon.scope=cwd: ${error instanceof Error ? error.message : String(error)}\n`,
+				),
+			);
+		}
 		if (cmd.action === "list") {
 			const interactive =
 				!cmd.flags.json && !cmd.flags.plain && process.stdout.isTTY === true && process.stdin.isTTY === true;
@@ -93,6 +103,7 @@ async function runList(cmd: PsCommandArgs): Promise<void> {
 				reports.map(({ scope, daemons }) => ({
 					kind: scope.kind,
 					projectDir: scope.projectDir,
+					originDir: scope.originDir,
 					service: scope.service,
 					runtimeDir: scope.runtimeDir,
 					brokerPid: scope.brokerPid,

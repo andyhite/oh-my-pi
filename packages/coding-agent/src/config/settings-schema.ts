@@ -4285,6 +4285,32 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"daemon.scope": {
+		type: "enum",
+		values: ["cwd", "git-common-dir"] as const,
+		default: "cwd",
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Daemon Broker Scope",
+			description:
+				"Which directory identifies the daemon broker scope shared by omp processes (launch tool, shared LSP, shared browser, blob broker); changing the mode mid-session re-keys the scope, so daemons already started under the previous key stay with the old broker until it exits",
+			options: [
+				{
+					value: "cwd",
+					label: "Project Directory",
+					description: "One broker per project directory; each git worktree gets its own",
+				},
+				{
+					value: "git-common-dir",
+					label: "Git Repository",
+					description:
+						"One broker per repository: every linked worktree shares the main worktree's scope (non-git directories keep per-directory scopes)",
+				},
+			],
+		},
+	},
+
 	"launch.enabled": {
 		type: "boolean",
 		default: true,

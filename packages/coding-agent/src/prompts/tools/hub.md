@@ -26,7 +26,7 @@ Project-scoped long-running processes shared by every omp instance in the same d
 
 - **`start`** launches `application` + `args` directly. `cwd` defaults to the session directory; `pty` defaults true.
   - `ready.log` is a JavaScript `RegExp` compiled with the `u` flag; PCRE inline modifiers such as `(?i)` are REJECTED — use `[Rr]eady` instead. `ready.port` is a TCP port. Both supplied? BOTH MUST pass. `ready.timeout` is seconds. Readiness MUST be observed; process creation alone is not readiness.
-  - Names are unique per project directory. A completed name MAY be started again; a live name MUST be stopped or restarted.
+  - Names are unique per broker scope: one project directory by default, or the whole repo (every linked worktree) under `daemon.scope: git-common-dir`. A completed name MAY be started again; a live name MUST be stopped or restarted.
   - `restart` policy defaults `no`; `on-failure` and `always` use bounded backoff.
   - `persist: true` opts out of last-omp teardown; `detached: true` survives broker shutdown and all omp exits (implies persist, disables PTY input). Omit both unless their survival guarantees are required.
 - **`ps`**, **`logs`**, **`wait`** (with `name`), **`send`** (with `name`), **`stop`**, **`restart`**, and **`describe`** address the stable `name`.

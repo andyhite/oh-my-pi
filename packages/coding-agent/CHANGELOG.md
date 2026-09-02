@@ -91,6 +91,9 @@
 ### Removed
 
 - Removed the bundled `designer` subagent and `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
+### Added
+
+- Added a `daemon.scope` setting: `git-common-dir` keys the daemon broker, shared LSP, shared browser, and blob broker by a repository's main worktree root, so every linked worktree shares one broker instead of getting its own; `omp ps` now shows which directory actually started the broker.
 
 ## [18.1.3] - 2026-09-02
 

@@ -12,6 +12,7 @@ import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
+	DAEMON_ORIGIN_DIR_ENV,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_PTY_COLUMNS,
 	DAEMON_PTY_ROWS,
@@ -1397,7 +1398,9 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 	const projectDir = process.env[DAEMON_PROJECT_DIR_ENV];
 	const runtimeDir = process.env[DAEMON_RUNTIME_DIR_ENV];
 	if (!projectDir || !runtimeDir) throw new Error("Daemon broker environment is incomplete");
+	const originDir = process.env[DAEMON_ORIGIN_DIR_ENV];
 	delete process.env[DAEMON_PROJECT_DIR_ENV];
+	delete process.env[DAEMON_ORIGIN_DIR_ENV];
 	delete process.env[DAEMON_RUNTIME_DIR_ENV];
 	const rawGrace = process.env[DAEMON_IDLE_GRACE_ENV];
 	delete process.env[DAEMON_IDLE_GRACE_ENV];
@@ -1414,7 +1417,7 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 	setProcessName("omp daemon broker");
 	// Record the scope's project dir so `omp ps` can map this hash-keyed runtime
 	// dir back to its project (and derive the Windows pipe name) offline.
-	void writeDaemonScopeMeta(runtimeDir, projectDir).catch(error => {
+	void writeDaemonScopeMeta(runtimeDir, { projectDir, originDir }).catch(error => {
 		logger.warn("Failed to record daemon scope metadata", {
 			error: error instanceof Error ? error.message : String(error),
 		});

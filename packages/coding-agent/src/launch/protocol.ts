@@ -11,6 +11,9 @@ export const DAEMON_PTY_ROWS = 40;
 /** Environment key carrying the broker's canonical project or synthetic global scope directory. */
 export const DAEMON_PROJECT_DIR_ENV = "OMP_DAEMON_PROJECT_DIR";
 
+/** Environment key carrying the directory of the omp process that started the broker. */
+export const DAEMON_ORIGIN_DIR_ENV = "OMP_DAEMON_ORIGIN_DIR";
+
 /** Environment key carrying the broker's private runtime directory. */
 export const DAEMON_RUNTIME_DIR_ENV = "OMP_DAEMON_RUNTIME_DIR";
 

@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { registerDaemonProjectPresence } from "../../src/launch/presence";
+import { canonicalDaemonScope } from "../../src/launch/scope";
 
 describe("daemon presence canonicalProjectDir EISDIR fallback", () => {
 	const originalRealpath = fs.realpath.bind(fs);
@@ -32,9 +33,10 @@ describe("daemon presence canonicalProjectDir EISDIR fallback", () => {
 		}) as typeof fs.realpath);
 
 		try {
-			const presence = await registerDaemonProjectPresence(projectDir, runtimeDir);
-			expect(typeof presence.close).toBe("function");
+			const scope = await canonicalDaemonScope(projectDir);
 			expect(realpathCalls).toBe(1);
+			const presence = await registerDaemonProjectPresence(scope, runtimeDir);
+			expect(typeof presence.close).toBe("function");
 
 			const clientsDir = path.join(runtimeDir, "clients");
 			const entries = await fs.readdir(clientsDir);

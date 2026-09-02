@@ -19,8 +19,9 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { createDaemonBrokerClient, type DaemonBrokerClient } from "../launch/client";
-import { canonicalProjectDir, daemonRuntimeDir, readDaemonScopeMeta } from "../launch/paths";
+import { daemonRuntimeDir, readDaemonScopeMeta } from "../launch/paths";
 import { readLiveDaemonBrokerPid } from "../launch/presence";
+import { resolveDaemonScope } from "../launch/scope";
 import {
 	type DaemonSnapshot,
 	type DaemonSpec,
@@ -35,6 +36,8 @@ export interface PsScope {
 	runtimeDir: string;
 	/** Canonical project dir when known; used to connect and displayed as the scope label. */
 	projectDir?: string;
+	/** Directory that started the broker, when it differs from the scope dir. */
+	originDir?: string;
 	/** Global service name (`kind === "global"`). */
 	service?: string;
 	/** Live broker PID; undefined when no broker owns the scope. */
@@ -81,9 +84,15 @@ export async function targetScope(target: PsTarget): Promise<PsScope> {
 			brokerPid: await readLiveDaemonBrokerPid(runtimeDir),
 		};
 	}
-	const projectDir = await canonicalProjectDir(target.dir ?? getProjectDir());
-	const runtimeDir = daemonRuntimeDir(projectDir);
-	return { kind: "project", runtimeDir, projectDir, brokerPid: await readLiveDaemonBrokerPid(runtimeDir) };
+	const scope = await resolveDaemonScope(target.dir ?? getProjectDir());
+	const runtimeDir = daemonRuntimeDir(scope.scopeDir);
+	return {
+		kind: "project",
+		runtimeDir,
+		projectDir: scope.scopeDir,
+		originDir: (await readDaemonScopeMeta(runtimeDir))?.originDir,
+		brokerPid: await readLiveDaemonBrokerPid(runtimeDir),
+	};
 }
 
 async function canonicalRuntimeDir(dir: string): Promise<string> {
@@ -103,7 +112,7 @@ export async function discoverScopes(): Promise<PsScope[]> {
 		scopes.push({
 			kind: "project",
 			runtimeDir,
-			projectDir: await resolveScopeProjectDir(runtimeDir),
+			...(await resolveScopeProjectDir(runtimeDir)),
 			brokerPid: await readLiveDaemonBrokerPid(runtimeDir),
 		});
 	}
@@ -132,11 +141,13 @@ async function readdirQuiet(dir: string): Promise<Dirent[]> {
 /**
  * Map a hash-keyed project runtime dir back to its project directory:
  * broker-written `scope.json` first, then any registered client presence file
- * (covers brokers started before scope metadata existed).
+ * (covers brokers started before scope metadata existed). Presence files are
+ * per-client leases, so a client's `originDir` does not identify who started
+ * the broker; origin is only known from a broker-written `scope.json`.
  */
-async function resolveScopeProjectDir(runtimeDir: string): Promise<string | undefined> {
+async function resolveScopeProjectDir(runtimeDir: string): Promise<{ projectDir?: string; originDir?: string }> {
 	const recorded = await readDaemonScopeMeta(runtimeDir);
-	if (recorded) return recorded;
+	if (recorded) return { projectDir: recorded.projectDir, originDir: recorded.originDir };
 	for (const entry of await readdirQuiet(path.join(runtimeDir, "clients"))) {
 		try {
 			const decoded: unknown = await Bun.file(path.join(runtimeDir, "clients", entry.name)).json();
@@ -146,13 +157,13 @@ async function resolveScopeProjectDir(runtimeDir: string): Promise<string | unde
 				"projectDir" in decoded &&
 				typeof decoded.projectDir === "string"
 			) {
-				return decoded.projectDir;
+				return { projectDir: decoded.projectDir };
 			}
 		} catch {
 			// Unreadable presence files are skipped; the scope stays unlabeled.
 		}
 	}
-	return undefined;
+	return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +348,11 @@ export function scopeHeader(scope: PsScope): string {
 		scope.kind === "global"
 			? `global ${chalk.bold(scope.service ?? path.basename(scope.runtimeDir))}`
 			: `project ${chalk.bold(scope.projectDir ?? path.basename(scope.runtimeDir))}`;
+	const origin =
+		scope.originDir !== undefined && scope.originDir !== scope.projectDir
+			? ` ${chalk.dim(`(started from ${scope.originDir})`)}`
+			: "";
 	const broker =
 		scope.brokerPid !== undefined ? chalk.green(`broker pid ${scope.brokerPid}`) : chalk.dim("broker not running");
-	return `${label} ${chalk.dim("—")} ${broker}`;
+	return `${label}${origin} ${chalk.dim("—")} ${broker}`;
 }

@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getDaemonRuntimeDir, isEisdir, isEnoent } from "@oh-my-pi/pi-utils";
+import { daemonScopeKey, getDaemonRuntimeDir, isEisdir, isEnoent } from "@oh-my-pi/pi-utils";
 
 /** Resolve the private runtime directory shared by omp processes in one project directory. */
 export { getDaemonRuntimeDir as daemonRuntimeDir };
@@ -23,21 +23,30 @@ export async function canonicalProjectDir(projectDir: string): Promise<string> {
 	}
 }
 
+/** Scope identity recorded in a broker runtime dir by the broker at startup. */
+export interface DaemonScopeMeta {
+	/** Canonical directory whose hash keys this runtime dir. */
+	projectDir: string;
+	/** Directory of the omp process that started the broker; absent for older brokers, or equal to `projectDir` when the scope is not shared. */
+	originDir?: string;
+}
+
 /**
  * Record the scope's canonical project directory inside its runtime dir.
  * Written by the broker at startup so out-of-process inspectors (`omp ps`)
  * can map a hash-keyed runtime dir back to its project.
  */
-export async function writeDaemonScopeMeta(runtimeDir: string, projectDir: string): Promise<void> {
-	await Bun.write(path.join(runtimeDir, SCOPE_FILE), JSON.stringify({ projectDir }));
+export async function writeDaemonScopeMeta(runtimeDir: string, meta: DaemonScopeMeta): Promise<void> {
+	await Bun.write(path.join(runtimeDir, SCOPE_FILE), JSON.stringify(meta));
 }
 
-/** Read the project directory recorded for a runtime dir; undefined when absent or malformed. */
-export async function readDaemonScopeMeta(runtimeDir: string): Promise<string | undefined> {
+/** Read the scope metadata recorded for a runtime dir; undefined when absent or malformed. */
+export async function readDaemonScopeMeta(runtimeDir: string): Promise<DaemonScopeMeta | undefined> {
 	try {
 		const raw: unknown = await Bun.file(path.join(runtimeDir, SCOPE_FILE)).json();
 		if (typeof raw === "object" && raw !== null && "projectDir" in raw && typeof raw.projectDir === "string") {
-			return raw.projectDir;
+			const originDir = "originDir" in raw && typeof raw.originDir === "string" ? raw.originDir : undefined;
+			return { projectDir: raw.projectDir, originDir };
 		}
 	} catch {
 		// Missing or malformed scope metadata reads as unknown.
@@ -46,10 +55,9 @@ export async function readDaemonScopeMeta(runtimeDir: string): Promise<string | 
 }
 
 /** Resolve the Unix socket or Windows named pipe used by one daemon broker scope. */
-export function daemonBrokerEndpoint(projectDir: string, runtimeDir: string): string {
+export function daemonBrokerEndpoint(scopeDir: string, runtimeDir: string): string {
 	if (process.platform === "win32") {
-		const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
-		return `\\\\.\\pipe\\omp-daemon-${key}`;
+		return `\\\\.\\pipe\\omp-daemon-${daemonScopeKey(scopeDir)}`;
 	}
 	return path.join(runtimeDir, "broker.sock");
 }
