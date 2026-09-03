@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import type { DaemonBrokerClient } from "../../../src/launch/client";
+import type { DaemonBrokerClient, IrcAttachHandlers, IrcAttachment } from "../../../src/launch/client";
 import * as daemonClient from "../../../src/launch/client";
 import type { DaemonCompletionNotification, DaemonRpcResult } from "../../../src/launch/protocol";
 import type { ToolSession } from "../../../src/tools";
@@ -15,6 +15,15 @@ class CleanExitWorker extends EventTarget {
 	}
 
 	terminate(): void {}
+}
+
+function fakeAttachIrc(handlers: IrcAttachHandlers): IrcAttachment {
+	return {
+		sync: async () => ({ instance: handlers.requestedName(), peers: [] }),
+		list: async () => [],
+		send: async () => ({ outcome: "failed" as const, error: "no transport in test fixture" }),
+		detach: async () => {},
+	};
 }
 
 describe("launch broker protocol compatibility", () => {
@@ -34,6 +43,7 @@ describe("launch broker protocol compatibility", () => {
 			request: async () => legacyResult,
 			close() {},
 			onCompletion: () => () => {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -63,6 +73,7 @@ describe("launch broker protocol compatibility", () => {
 			request: async () => legacyResult,
 			onCompletion: () => () => {},
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -119,6 +130,7 @@ describe("launch broker protocol compatibility", () => {
 				} as const;
 			},
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -156,6 +168,7 @@ describe("launch broker protocol compatibility", () => {
 					state: "running",
 				}) as const,
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -204,6 +217,7 @@ describe("launch broker protocol compatibility", () => {
 				} as const;
 			},
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -246,6 +260,7 @@ describe("launch broker protocol compatibility", () => {
 				return { op: "wait", daemon, timedOut: false } as const;
 			},
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -272,6 +287,7 @@ describe("launch broker protocol compatibility", () => {
 			},
 			request: async () => ({ op: "list", daemons: [] }) as const,
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -325,6 +341,7 @@ describe("launch broker protocol compatibility", () => {
 			},
 			request: async () => ({ op: "start", daemon: completion.daemon, readyTimedOut: false }) as const,
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -361,6 +378,7 @@ describe("launch broker protocol compatibility", () => {
 				throw new Error("Daemon broker request aborted");
 			},
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -393,6 +411,7 @@ describe("launch broker protocol compatibility", () => {
 				return { op: "list", daemons: [] };
 			},
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -443,6 +462,7 @@ describe("launch broker protocol compatibility", () => {
 				};
 			},
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const session = {
@@ -471,6 +491,7 @@ describe("launch broker protocol compatibility", () => {
 				throw new daemonClient.DaemonBrokerRejectedError("daemon not found");
 			},
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -502,6 +523,7 @@ describe("launch broker protocol compatibility", () => {
 			},
 			request: () => (++requests === 1 ? rejected.promise : accepted.promise),
 			close() {},
+			attachIrc: fakeAttachIrc,
 		} as unknown as DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const session = {

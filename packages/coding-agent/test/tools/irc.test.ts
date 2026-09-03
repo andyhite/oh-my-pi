@@ -710,6 +710,7 @@ describe("IRC", () => {
 				running: 1,
 				idle: 0,
 				parked: 1,
+				remote: 0,
 				shown: 1,
 				truncated: 0,
 			});

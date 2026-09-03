@@ -16,11 +16,13 @@
  */
 
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import type { IrcDeliveryOutcome } from "../launch/protocol";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
+import { parseIrcId, resolvePeerTarget } from "./identity";
 
 export interface IrcMessage {
 	id: string;
@@ -43,8 +45,24 @@ export interface IrcMessage {
 
 export interface IrcDeliveryReceipt {
 	to: string;
-	outcome: "injected" | "woken" | "revived" | "failed";
+	outcome: IrcDeliveryOutcome;
 	error?: string;
+}
+
+/** Cross-process leg of the bus; installed by the launch-layer bridge. */
+export interface IrcRemoteTransport {
+	/** This process's broker-granted instance name, qualifying its ids on the wire. */
+	readonly instance: string;
+	/** Deliver to a peer in another instance; resolves with that peer's receipt. */
+	send(
+		message: IrcMessage,
+		target: { instance: string; id: string },
+		opts?: { expectsReply?: boolean },
+	): Promise<IrcDeliveryReceipt>;
+	/** Pull a fresh scope roster into the registry overlay. Never throws. */
+	refresh(): Promise<void>;
+	/** Push the local roster + requested instance name; resolves after the grant lands. */
+	syncIdentity(): Promise<void>;
 }
 
 interface IrcWaiter {
@@ -91,12 +109,46 @@ export class IrcBus {
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
+	#remote: IrcRemoteTransport | undefined;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	}
+
+	/** Install the cross-process transport leg. */
+	attachRemote(transport: IrcRemoteTransport): void {
+		this.#remote = transport;
+	}
+
+	/** Uninstall the cross-process transport leg, if it is the installed one. */
+	detachRemote(transport: IrcRemoteTransport): void {
+		if (this.#remote === transport) this.#remote = undefined;
+	}
+
+	/** This process's broker-granted instance name, or undefined with no transport attached. */
+	remoteInstance(): string | undefined {
+		return this.#remote?.instance;
+	}
+
+	/** Pull a fresh scope roster into the registry overlay. Never rejects. */
+	async refreshRemote(): Promise<void> {
+		try {
+			await this.#remote?.refresh();
+		} catch (error) {
+			logger.debug("IrcBus: refreshRemote failed", { error: String(error) });
+		}
+	}
+
+	/** Push the local roster + requested instance name. Never rejects. */
+	async syncRemoteIdentity(): Promise<void> {
+		try {
+			await this.#remote?.syncIdentity();
+		} catch (error) {
+			logger.debug("IrcBus: syncRemoteIdentity failed", { error: String(error) });
+		}
 	}
 
 	/**
@@ -128,14 +180,42 @@ export class IrcBus {
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
-		const receipt = await this.#deliver(message, opts);
+		const target = resolvePeerTarget(this.#registry, message.to, this.#remote?.instance);
+		let receipt: IrcDeliveryReceipt;
+
+		if (target.kind === "local") {
+			receipt = await this.#deliverLocal({ ...message, to: target.id }, opts);
+		} else if (target.kind === "remote") {
+			if (!this.#remote) {
+				receipt = { to: target.id, outcome: "failed", error: `Agent "${target.id}" has no live session.` };
+			} else {
+				const remoteReceipt = await this.#remote.send(
+					message,
+					{ instance: target.instance, id: target.localId },
+					opts,
+				);
+				receipt = { ...remoteReceipt, to: target.id };
+			}
+		} else if (target.kind === "ambiguous") {
+			receipt = {
+				to: message.to,
+				outcome: "failed",
+				error: `Ambiguous peer "${message.to}" — ${target.candidates.length} omp processes advertise it: ${target.candidates.join(", ")}. Address one explicitly.`,
+			};
+		} else {
+			// "unknown" and "broadcast" fall through to the local path unchanged:
+			// broadcast is expanded to concrete ids by callers before it reaches
+			// here, and "unknown" must keep producing today's exact error text.
+			receipt = await this.#deliverLocal(message, opts);
+		}
+
 		if (receipt.outcome !== "failed") {
 			let sent = this.#lastSent.get(message.from);
 			if (!sent) {
 				sent = new Map();
 				this.#lastSent.set(message.from, sent);
 			}
-			sent.set(message.to, message.ts);
+			sent.set(receipt.to, message.ts);
 		}
 		return receipt;
 	}
@@ -150,7 +230,17 @@ export class IrcBus {
 		return ts !== undefined && ts >= sinceTs;
 	}
 
-	async #deliver(
+	/** Deliver a message that arrived from another instance. */
+	async deliverIncoming(message: IrcMessage, opts?: { expectsReply?: boolean }): Promise<IrcDeliveryReceipt> {
+		// The broker already routed this to us by instance name; that prefix may
+		// be a name we have since renamed away from, so always strip it. Agent
+		// ids never contain the separator, so this cannot mis-strip a bare id.
+		const parsed = parseIrcId(message.to);
+		const to = parsed.instance === undefined ? message.to : parsed.id;
+		return this.#deliverLocal({ ...message, to }, { ...opts, suppressRelay: true });
+	}
+
+	async #deliverLocal(
 		message: IrcMessage,
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
@@ -332,14 +422,16 @@ export class IrcBus {
 
 		if (liveness) {
 			const { registry, senderId } = liveness;
-			const hasRunningSender = (from?: string): boolean =>
-				registry.listVisibleTo(senderId).some(ref => registry.isRunning(ref) && (!from || ref.id === from));
-			const check = filter.from ? () => hasRunningSender(filter.from) : () => hasRunningSender();
-			unsubscribeLiveness = registry.onChange(() => {
-				if (!check()) {
-					settle({ kind: "abort", error: new Error(livenessReason) });
-				}
-			});
+			const check = (): boolean => registry.hasRunningPeer(senderId, filter.from);
+			const onLivenessChange = (): void => {
+				if (!check()) settle({ kind: "abort", error: new Error(livenessReason) });
+			};
+			const unsubscribeLocal = registry.onChange(onLivenessChange);
+			const unsubscribeRemote = registry.onRemoteChange(onLivenessChange);
+			unsubscribeLiveness = () => {
+				unsubscribeLocal();
+				unsubscribeRemote();
+			};
 			if (!check()) {
 				settle({ kind: "abort", error: new Error(livenessReason) });
 			}
@@ -356,51 +448,76 @@ export class IrcBus {
 		const awaitTarget = options?.awaitTarget;
 		if (awaitTarget) {
 			const { registry, target } = awaitTarget;
-			let subscribedSession: AgentSession | null = null;
-			let unsubscribeSession: (() => void) | undefined;
-			let active = true;
-			// The peer's terminal `agent_end` is the authoritative "stopped" signal.
-			// It is emitted only after the peer's prompt fully unwinds (see
-			// AgentSession#flushPendingAgentEnd) and supersedes scheduled
-			// continuations. A side-channel auto-reply may outlive that main turn,
-			// though, so wait for it before declaring the peer stopped: its bus send
-			// resolves this waiter first; an empty/failed reply then falls through to
-			// the clean stopped result.
-			const onSessionEvent = (event: AgentSessionEvent): void => {
-				if (event.type !== "agent_end" || event.isTerminal === false) return;
-				const session = subscribedSession;
-				if (!session) {
-					settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
-					return;
-				}
-				void session.waitForIrcReplies().then(() => {
-					if (!active || registry.get(target)?.session !== session) return;
-					settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
-				});
-			};
-			const sync = (): void => {
-				const ref = registry.get(target);
-				// Gone or hard-aborted: no reply will ever come.
-				if (!ref || ref.status === "aborted") {
-					settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
-					return;
-				}
-				// Follow the live session across a park→revive rebuild; tolerate a
-				// parked peer with no session yet (the send is about to revive it).
-				const session = ref.session;
-				if (session && session !== subscribedSession) {
+			const remoteInstance = this.#remote?.instance;
+			const targetInstance = parseIrcId(target).instance;
+			if (targetInstance !== undefined && targetInstance !== remoteInstance) {
+				// Remote peer: no local AgentSession to observe. Track liveness
+				// through the registry overlay instead, mirroring the local
+				// session-event path's "observed running, then stopped" gate.
+				let wasRunning = false;
+				const sync = (): void => {
+					const peer = registry.getRemotePeer(target);
+					if (!peer) {
+						settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
+						return;
+					}
+					if (peer.live) {
+						wasRunning = true;
+						return;
+					}
+					if (wasRunning) {
+						settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
+					}
+				};
+				unsubscribeAwaitTarget = registry.onRemoteChange(sync);
+				sync();
+			} else {
+				let subscribedSession: AgentSession | null = null;
+				let unsubscribeSession: (() => void) | undefined;
+				let active = true;
+				// The peer's terminal `agent_end` is the authoritative "stopped" signal.
+				// It is emitted only after the peer's prompt fully unwinds (see
+				// AgentSession#flushPendingAgentEnd) and supersedes scheduled
+				// continuations. A side-channel auto-reply may outlive that main turn,
+				// though, so wait for it before declaring the peer stopped: its bus send
+				// resolves this waiter first; an empty/failed reply then falls through to
+				// the clean stopped result.
+				const onSessionEvent = (event: AgentSessionEvent): void => {
+					if (event.type !== "agent_end" || event.isTerminal === false) return;
+					const session = subscribedSession;
+					if (!session) {
+						settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
+						return;
+					}
+					void session.waitForIrcReplies().then(() => {
+						if (!active || registry.get(target)?.session !== session) return;
+						settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
+					});
+				};
+				const sync = (): void => {
+					const ref = registry.get(target);
+					// Gone or hard-aborted: no reply will ever come.
+					if (!ref || ref.status === "aborted") {
+						settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
+						return;
+					}
+					// Follow the live session across a park→revive rebuild; tolerate a
+					// parked peer with no session yet (the send is about to revive it).
+					const session = ref.session;
+					if (session && session !== subscribedSession) {
+						unsubscribeSession?.();
+						subscribedSession = session;
+						unsubscribeSession = session.subscribe(onSessionEvent);
+					}
+				};
+				const unsubscribeChange = registry.onChange(sync);
+				unsubscribeAwaitTarget = () => {
+					active = false;
+					unsubscribeChange();
 					unsubscribeSession?.();
-					subscribedSession = session;
-					unsubscribeSession = session.subscribe(onSessionEvent);
-				}
-			};
-			const unsubscribeChange = registry.onChange(sync);
-			unsubscribeAwaitTarget = () => {
-				active = false;
-				unsubscribeChange();
-				unsubscribeSession?.();
-			};
-			sync();
+				};
+				sync();
+			}
 		}
 
 		return promise;

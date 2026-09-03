@@ -31,6 +31,7 @@
  */
 
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
+import { sanitizeInstanceName } from "../irc/instance";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
@@ -177,6 +178,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	},
 	"--session-dir": (result, value) => {
 		result.sessionDir = value;
+	},
+	"--name": (result, value) => {
+		if (sanitizeInstanceName(value) === undefined) {
+			throw new CliUsageError("--name must contain at least one letter, number, underscore, or hyphen");
+		}
+		result.name = value;
 	},
 	"--models": (result, value) => {
 		result.models = value.split(",").map(s => s.trim());

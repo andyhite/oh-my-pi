@@ -15,6 +15,11 @@ import {
 	type DaemonOperation,
 	type DaemonRpcResult,
 	type DaemonWireMessage,
+	type IrcAgentRecord,
+	type IrcDeliveryOutcome,
+	type IrcIncomingNotification,
+	type IrcPeerRecord,
+	type IrcWireMessage,
 	parseDaemonRpcResult,
 	parseDaemonWireMessage,
 } from "./protocol";
@@ -49,6 +54,35 @@ export interface DaemonCompletionUnregisterOptions {
 	preservePending?: boolean;
 }
 
+/** Handlers an IRC-attaching consumer supplies to route inbound cross-process traffic. */
+export interface IrcAttachHandlers {
+	/** Immutable wire identity for this process. */
+	token: string;
+	/** Instance name to request on every sync; re-read so renames propagate. */
+	requestedName(): string;
+	/** Current local roster; re-read on every sync and after every reconnect. */
+	roster(): IrcAgentRecord[];
+	/** The broker granted this name (possibly suffixed); adopt it. */
+	nameGranted(name: string): void;
+	/** Deliver an inbound message locally; the resolved receipt is acked to the broker. */
+	incoming(notification: IrcIncomingNotification): Promise<{ outcome: IrcDeliveryOutcome; error?: string }>;
+	/** Scope roster changed; never includes this instance's own rows. */
+	rosterChanged(peers: IrcPeerRecord[]): void;
+}
+
+/** Live cross-process IRC attachment to one daemon broker scope. */
+export interface IrcAttachment {
+	/** Push name + full local roster; resolves with the granted name and scope roster. */
+	sync(): Promise<{ instance: string; peers: IrcPeerRecord[] }>;
+	/** Pull the broker's current scope roster. */
+	list(): Promise<IrcPeerRecord[]>;
+	send(
+		message: IrcWireMessage,
+		opts: { expectsReply: boolean; timeoutMs: number },
+	): Promise<{ outcome: IrcDeliveryOutcome; error?: string }>;
+	detach(): Promise<void>;
+}
+
 /** Persistent per-process connection to one project or global daemon broker. */
 export interface DaemonBrokerClient {
 	onCompletion(
@@ -59,6 +93,7 @@ export interface DaemonBrokerClient {
 	readonly projectDir: string;
 	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
 	close(): void;
+	attachIrc(handlers: IrcAttachHandlers): IrcAttachment;
 }
 
 /** A request reached the broker and the broker rejected the operation. */
@@ -100,6 +135,7 @@ function requestTimeoutMs(operation: DaemonOperation): number {
 		case "wait":
 		case "logs":
 		case "stop":
+		case "irc.send":
 			return operation.timeoutMs + 5_000;
 		default:
 			return 30_000;
@@ -145,12 +181,15 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #preservedCompletionOwners = new Set<string>();
 	readonly #completionReplays = new Set<string>();
 	readonly #inFlightCompletionIds = new Set<string>();
+	readonly #inFlightIrcDeliveries = new Set<string>();
 	readonly #completionSubscriptionId = crypto.randomUUID();
+	#irc: IrcAttachHandlers | undefined;
 	#socket: net.Socket | undefined;
 	#connectPromise: Promise<void> | undefined;
 	#buffer = "";
 	#closed = false;
 	#completionReconnectTimer: NodeJS.Timeout | undefined;
+	#ircSyncPromise: Promise<{ instance: string; peers: IrcPeerRecord[] }> | undefined;
 
 	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
 		this.projectDir = projectDir;
@@ -222,6 +261,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#preservedCompletionOwners.clear();
 		this.#completionReplays.clear();
 		this.#socket = undefined;
+		this.#irc = undefined;
 		this.#rejectPending(new Error("Daemon broker client closed"));
 	}
 
@@ -250,15 +290,71 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		};
 	}
 
-	#publishCompletionOwners(): void {
-		if (this.#closed) return;
-		void this.request({ op: "ping" }).catch(() => this.#scheduleCompletionReconnect());
+	attachIrc(handlers: IrcAttachHandlers): IrcAttachment {
+		this.#irc = handlers;
+		this.#publishIrcAttachment();
+		return {
+			sync: () => this.#syncIrc(),
+			list: async () => {
+				const result = await this.request({ op: "irc.list", token: handlers.token });
+				if (result.op !== "irc.list") throw new Error(`Unexpected daemon response for irc.list: ${result.op}`);
+				return result.peers;
+			},
+			send: async (message, opts) => {
+				const result = await this.request({
+					op: "irc.send",
+					token: handlers.token,
+					message,
+					expectsReply: opts.expectsReply,
+					timeoutMs: opts.timeoutMs,
+				});
+				if (result.op !== "irc.send") throw new Error(`Unexpected daemon response for irc.send: ${result.op}`);
+				return { outcome: result.outcome, error: result.error };
+			},
+			detach: async () => {
+				await this.request({ op: "irc.detach", token: handlers.token }).catch(() => {});
+				this.#irc = undefined;
+			},
+		};
 	}
 
-	#scheduleCompletionReconnect(): void {
+	#syncIrc(): Promise<{ instance: string; peers: IrcPeerRecord[] }> {
+		if (this.#ircSyncPromise) return this.#ircSyncPromise;
+		const handlers = this.#irc;
+		if (!handlers) throw new Error("IRC attachment is unavailable");
+		const promise = this.request({
+			op: "irc.sync",
+			token: handlers.token,
+			name: handlers.requestedName(),
+			agents: handlers.roster(),
+		}).then(result => {
+			if (result.op !== "irc.sync") throw new Error(`Unexpected daemon response for irc.sync: ${result.op}`);
+			handlers.nameGranted(result.instance);
+			return { instance: result.instance, peers: result.peers };
+		});
+		this.#ircSyncPromise = promise;
+		void promise
+			.finally(() => {
+				if (this.#ircSyncPromise === promise) this.#ircSyncPromise = undefined;
+			})
+			.catch(() => {});
+		return promise;
+	}
+
+	#publishCompletionOwners(): void {
+		if (this.#closed) return;
+		void this.request({ op: "ping" }).catch(() => this.#scheduleReconnect());
+	}
+
+	#publishIrcAttachment(): void {
+		if (this.#closed || !this.#irc) return;
+		void this.#syncIrc().catch(() => this.#scheduleReconnect());
+	}
+
+	#scheduleReconnect(): void {
 		if (
 			this.#closed ||
-			this.#completionSinks.size === 0 ||
+			(this.#completionSinks.size === 0 && this.#irc === undefined) ||
 			this.#completionReconnectTimer !== undefined ||
 			(this.#socket !== undefined && !this.#socket.destroyed)
 		) {
@@ -267,6 +363,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#completionReconnectTimer = setTimeout(() => {
 			this.#completionReconnectTimer = undefined;
 			this.#publishCompletionOwners();
+			this.#publishIrcAttachment();
 		}, CONNECT_RETRY_MS);
 		this.#completionReconnectTimer.unref();
 	}
@@ -334,8 +431,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		socket.on("close", () => {
 			if (this.#socket === socket) this.#socket = undefined;
 			this.#rejectPending(new Error("Daemon broker connection closed"));
-			this.#scheduleCompletionReconnect();
+			this.#scheduleReconnect();
 		});
+		this.#publishIrcAttachment();
 	}
 
 	#onData(chunk: string | Buffer): void {
@@ -371,7 +469,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				continue;
 			}
 			if ("event" in message) {
-				void this.#deliverCompletion(message);
+				if (message.event === "daemon-completed") {
+					void this.#deliverCompletion(message);
+				} else if (message.event === "irc-incoming") {
+					void this.#deliverIrcIncoming(message);
+				} else if (message.event === "irc-roster") {
+					this.#irc?.rosterChanged(message.peers);
+				}
 				continue;
 			}
 			const response = message;
@@ -437,6 +541,31 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				operation: { op: "ping" },
 			})}\n`,
 		);
+	}
+
+	async #deliverIrcIncoming(notification: IrcIncomingNotification): Promise<void> {
+		if (this.#inFlightIrcDeliveries.has(notification.deliveryId)) return;
+		const handlers = this.#irc;
+		if (!handlers) return;
+		this.#inFlightIrcDeliveries.add(notification.deliveryId);
+		try {
+			const result = await handlers.incoming(notification);
+			this.#ackIrcDelivery(notification.deliveryId, result.outcome, result.error);
+		} catch (error) {
+			this.#ackIrcDelivery(
+				notification.deliveryId,
+				"failed",
+				error instanceof Error ? error.message : String(error),
+			);
+		} finally {
+			this.#inFlightIrcDeliveries.delete(notification.deliveryId);
+		}
+	}
+
+	#ackIrcDelivery(deliveryId: string, outcome: IrcDeliveryOutcome, error?: string): void {
+		const handlers = this.#irc;
+		if (!handlers) return;
+		void this.request({ op: "irc.ack", token: handlers.token, deliveryId, outcome, error }).catch(() => {});
 	}
 
 	#rejectPending(error: Error): void {

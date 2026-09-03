@@ -92,7 +92,64 @@ export type DaemonOperation =
 	| { op: "stop"; name: string; timeoutMs: number }
 	| { op: "restart"; name: string }
 	| { op: "describe"; name: string }
-	| { op: "shutdown" };
+	| { op: "shutdown" }
+	| { op: "irc.sync"; token: string; name: string; agents: IrcAgentRecord[] }
+	| { op: "irc.detach"; token: string }
+	| { op: "irc.list"; token: string }
+	| { op: "irc.send"; token: string; message: IrcWireMessage; expectsReply: boolean; timeoutMs: number }
+	| { op: "irc.ack"; token: string; deliveryId: string; outcome: IrcDeliveryOutcome; error?: string };
+
+/** How a message reached its recipient; mirrors IrcDeliveryReceipt.outcome. */
+export type IrcDeliveryOutcome = "injected" | "woken" | "revived" | "failed";
+
+/** One agent advertised to the scope by its owning omp instance. */
+export interface IrcAgentRecord {
+	/** Instance-local agent id (e.g. "Main", "AuthLoader"); never contains "/". */
+	id: string;
+	displayName: string;
+	kind: "main" | "sub";
+	/** Instance-local parent id, when the agent has one. */
+	parentId?: string;
+	/** Only live agents are advertised. */
+	status: "running" | "idle";
+	/** Whether an attached live session corroborates a `running` claim. */
+	live: boolean;
+	lastActivity: number;
+	activity?: string;
+}
+
+/** A scope roster row: an IrcAgentRecord plus its owning instance's name. */
+export interface IrcPeerRecord extends IrcAgentRecord {
+	/** Broker-granted instance name; qualifies `id` as `<instance>/<id>`. */
+	instance: string;
+}
+
+/** One message moving between omp instances; ids are fully qualified. */
+export interface IrcWireMessage {
+	id: string;
+	/** `<instance-name>/<agent id>` */
+	from: string;
+	/** `<instance-name>/<agent id>` */
+	to: string;
+	body: string;
+	ts: number;
+	replyTo?: string;
+}
+
+/** A message addressed to an agent owned by the receiving instance. */
+export interface IrcIncomingNotification {
+	event: "irc-incoming";
+	/** Correlates the recipient's `irc.ack` with the sender's pending `irc.send`. */
+	deliveryId: string;
+	message: IrcWireMessage;
+	expectsReply: boolean;
+}
+
+/** Scope roster changed; `peers` excludes the receiving instance's own rows. */
+export interface IrcRosterNotification {
+	event: "irc-roster";
+	peers: IrcPeerRecord[];
+}
 
 /** Typed broker result decoded before it reaches tool code. */
 export type DaemonRpcResult =
@@ -116,7 +173,12 @@ export type DaemonRpcResult =
 	| { op: "stop"; daemon: DaemonSnapshot }
 	| { op: "restart"; daemon: DaemonSnapshot }
 	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
-	| { op: "shutdown" };
+	| { op: "shutdown" }
+	| { op: "irc.sync"; instance: string; peers: IrcPeerRecord[] }
+	| { op: "irc.detach" }
+	| { op: "irc.list"; peers: IrcPeerRecord[] }
+	| { op: "irc.send"; outcome: IrcDeliveryOutcome; error?: string }
+	| { op: "irc.ack" };
 
 /** Authenticated request envelope used by socket clients. */
 export interface DaemonWireRequest {
@@ -143,7 +205,11 @@ export interface DaemonCompletionNotification {
 	daemon: DaemonSnapshot;
 }
 
-export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification;
+export type DaemonWireMessage =
+	| DaemonWireResponse
+	| DaemonCompletionNotification
+	| IrcIncomingNotification
+	| IrcRosterNotification;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -220,6 +286,59 @@ function daemonSignal(value: unknown): DaemonSignal {
 	if (signal === "SIGINT" || signal === "SIGTERM" || signal === "SIGHUP") return signal;
 	if (signal === "SIGQUIT" || signal === "SIGKILL") return signal;
 	throw new Error(`Unknown daemon signal: ${signal}`);
+}
+
+function parseIrcAgentRecord(value: unknown): IrcAgentRecord {
+	const source = record(value, "irc agent");
+	const id = stringValue(source.id, "agent.id");
+	if (id.includes("/")) throw new Error('Agent id must not contain "/"');
+	const kind = stringValue(source.kind, "agent.kind");
+	if (kind !== "main" && kind !== "sub") throw new Error(`Unknown agent kind: ${kind}`);
+	const status = stringValue(source.status, "agent.status");
+	if (status !== "running" && status !== "idle") throw new Error(`Unknown agent status: ${status}`);
+	return {
+		id,
+		displayName: stringValue(source.displayName, "agent.displayName"),
+		kind,
+		parentId: optionalString(source.parentId, "agent.parentId"),
+		status,
+		live: booleanValue(source.live, "agent.live"),
+		lastActivity: numberValue(source.lastActivity, "agent.lastActivity"),
+		activity: optionalString(source.activity, "agent.activity"),
+	};
+}
+
+function parseIrcPeerRecord(value: unknown): IrcPeerRecord {
+	const agent = parseIrcAgentRecord(value);
+	const source = record(value, "irc peer");
+	return { ...agent, instance: stringValue(source.instance, "peer.instance") };
+}
+
+function parseIrcWireMessage(value: unknown): IrcWireMessage {
+	const source = record(value, "irc message");
+	return {
+		id: stringValue(source.id, "message.id"),
+		from: stringValue(source.from, "message.from"),
+		to: stringValue(source.to, "message.to"),
+		body: rawString(source.body, "message.body"),
+		ts: numberValue(source.ts, "message.ts"),
+		replyTo: optionalString(source.replyTo, "message.replyTo"),
+	};
+}
+
+function ircDeliveryOutcome(value: unknown): IrcDeliveryOutcome {
+	const outcome = stringValue(value, "delivery outcome");
+	if (outcome === "injected" || outcome === "woken" || outcome === "revived" || outcome === "failed") return outcome;
+	throw new Error(`Unknown irc delivery outcome: ${outcome}`);
+}
+
+/** Decode and validate an instance name; shared with the cross-process identity holder. */
+export function parseIrcInstanceName(value: unknown, field: string): string {
+	const name = stringValue(value, field);
+	if (!/^[A-Za-z0-9_-]{1,48}$/.test(name)) {
+		throw new Error("Instance name must be 1-48 letters, numbers, underscores, or hyphens");
+	}
+	return name;
 }
 
 function readyPendingList(value: unknown): ("log" | "port")[] {
@@ -335,6 +454,18 @@ export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 			daemon: parseDaemonSnapshot(source.daemon),
 		};
 	}
+	if (source.event === "irc-incoming") {
+		return {
+			event: "irc-incoming",
+			deliveryId: stringValue(source.deliveryId, "notification.deliveryId"),
+			message: parseIrcWireMessage(source.message),
+			expectsReply: booleanValue(source.expectsReply, "notification.expectsReply"),
+		};
+	}
+	if (source.event === "irc-roster") {
+		if (!Array.isArray(source.peers)) throw new Error("notification.peers must be an array");
+		return { event: "irc-roster", peers: source.peers.map(parseIrcPeerRecord) };
+	}
 	return parseDaemonWireResponse(value);
 }
 
@@ -394,6 +525,33 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 		case "restart":
 		case "describe":
 			return { op, name: stringValue(source.name, "operation.name") };
+		case "irc.sync":
+			if (!Array.isArray(source.agents)) throw new Error("operation.agents must be an array");
+			return {
+				op,
+				token: stringValue(source.token, "operation.token"),
+				name: parseIrcInstanceName(source.name, "operation.name"),
+				agents: source.agents.map(parseIrcAgentRecord),
+			};
+		case "irc.detach":
+		case "irc.list":
+			return { op, token: stringValue(source.token, "operation.token") };
+		case "irc.send":
+			return {
+				op,
+				token: stringValue(source.token, "operation.token"),
+				message: parseIrcWireMessage(source.message),
+				expectsReply: booleanValue(source.expectsReply, "operation.expectsReply"),
+				timeoutMs: numberValue(source.timeoutMs, "operation.timeoutMs"),
+			};
+		case "irc.ack":
+			return {
+				op,
+				token: stringValue(source.token, "operation.token"),
+				deliveryId: stringValue(source.deliveryId, "operation.deliveryId"),
+				outcome: ircDeliveryOutcome(source.outcome),
+				error: optionalString(source.error, "operation.error"),
+			};
 		default:
 			throw new Error(`Unknown daemon operation: ${op}`);
 	}
@@ -449,5 +607,25 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 			};
 		case "shutdown":
 			return { op: "shutdown" };
+		case "irc.sync":
+			if (!Array.isArray(source.peers)) throw new Error("result.peers must be an array");
+			return {
+				op: "irc.sync",
+				instance: parseIrcInstanceName(source.instance, "result.instance"),
+				peers: source.peers.map(parseIrcPeerRecord),
+			};
+		case "irc.detach":
+			return { op: "irc.detach" };
+		case "irc.list":
+			if (!Array.isArray(source.peers)) throw new Error("result.peers must be an array");
+			return { op: "irc.list", peers: source.peers.map(parseIrcPeerRecord) };
+		case "irc.send":
+			return {
+				op: "irc.send",
+				outcome: ircDeliveryOutcome(source.outcome),
+				error: optionalString(source.error, "result.error"),
+			};
+		case "irc.ack":
+			return { op: "irc.ack" };
 	}
 }

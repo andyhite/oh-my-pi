@@ -6,6 +6,7 @@ import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
+import { parseIrcId } from "../irc/identity";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
@@ -24,10 +25,14 @@ import {
 	type DaemonSnapshot,
 	type DaemonSpec,
 	type DaemonWireRequest,
+	type IrcAgentRecord,
+	type IrcDeliveryOutcome,
+	type IrcPeerRecord,
 	parseDaemonSnapshot,
 	parseDaemonSpec,
 	parseDaemonWireMessage,
 	parseDaemonWireRequest,
+	parseIrcInstanceName,
 } from "./protocol";
 import { resolveDaemonSpawnOptions } from "./spawn-options";
 import { renderTerminalOutput } from "./terminal-output";
@@ -373,6 +378,21 @@ class DaemonBroker {
 	#server: net.Server | undefined;
 	#idleTimer: NodeJS.Timeout | undefined;
 	#shuttingDown = false;
+	readonly #ircInstances = new Map<
+		string,
+		{ socket: net.Socket; name: string; agents: Map<string, IrcAgentRecord> }
+	>();
+	readonly #ircSockets = new Map<net.Socket, string>();
+	readonly #ircDeliveries = new Map<
+		string,
+		{
+			targetToken: string;
+			resolve: (value: { outcome: IrcDeliveryOutcome; error?: string }) => void;
+			timer: NodeJS.Timeout;
+			to: string;
+			instanceName: string;
+		}
+	>();
 
 	constructor(
 		projectDir: string,
@@ -417,6 +437,13 @@ class DaemonBroker {
 			await record.persistQueue;
 		}
 		this.#ownerSockets.clear();
+		for (const pending of this.#ircDeliveries.values()) {
+			clearTimeout(pending.timer);
+			pending.resolve({ outcome: "failed", error: "Daemon broker is shutting down." });
+		}
+		this.#ircDeliveries.clear();
+		this.#ircInstances.clear();
+		this.#ircSockets.clear();
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
@@ -460,6 +487,13 @@ class DaemonBroker {
 		});
 		socket.on("close", () => {
 			this.#sockets.delete(socket);
+			const ircToken = this.#ircSockets.get(socket);
+			if (ircToken !== undefined) {
+				this.#ircSockets.delete(socket);
+				this.#ircInstances.delete(ircToken);
+				this.#failIrcDeliveriesForToken(ircToken);
+				this.#broadcastIrcRoster();
+			}
 			if (!authenticated) return;
 			this.#clients.delete(socket);
 			this.#scheduleIdleShutdown();
@@ -549,7 +583,7 @@ class DaemonBroker {
 					if (registration?.subscriptionId === request.completionSubscriptionId) this.#ownerSockets.delete(owner);
 				}
 			}
-			const result = await this.#dispatch(request.operation);
+			const result = await this.#dispatch(request.operation, socket);
 			socket.write(`${JSON.stringify({ id, ok: true, result })}\n`);
 			if (request.operation.op === "shutdown") setTimeout(() => void this.shutdown(), 10);
 		} catch (error) {
@@ -558,7 +592,7 @@ class DaemonBroker {
 		}
 	}
 
-	async #dispatch(operation: DaemonOperation): Promise<DaemonRpcResult> {
+	async #dispatch(operation: DaemonOperation, socket: net.Socket): Promise<DaemonRpcResult> {
 		switch (operation.op) {
 			case "ping":
 				return { op: "ping", projectDir: this.#projectDir };
@@ -591,7 +625,195 @@ class DaemonBroker {
 			}
 			case "shutdown":
 				return { op: "shutdown" };
+			case "irc.sync":
+				return this.#ircSync(operation, socket);
+			case "irc.detach":
+				return this.#ircDetach(operation, socket);
+			case "irc.list":
+				return this.#ircList(operation, socket);
+			case "irc.send":
+				return this.#ircSend(operation, socket);
+			case "irc.ack":
+				return this.#ircAck(operation, socket);
 		}
+	}
+
+	/** Find the token/entry pair whose granted name matches `name`, case-insensitively. */
+	#resolveIrcName(
+		name: string,
+	): { token: string; entry: { socket: net.Socket; name: string; agents: Map<string, IrcAgentRecord> } } | undefined {
+		const target = name.toLowerCase();
+		for (const [token, entry] of this.#ircInstances) {
+			if (entry.name.toLowerCase() === target) return { token, entry };
+		}
+		return undefined;
+	}
+
+	/** Grant an instance name, suffixing on collision with a DIFFERENT token's current name. */
+	#grantIrcName(token: string, requested: string): string {
+		const held = (candidate: string): boolean => {
+			const resolved = this.#resolveIrcName(candidate);
+			return resolved !== undefined && resolved.token !== token;
+		};
+		if (!held(requested)) return requested;
+		const clamp = (suffix: string): string => `${requested.slice(0, 47 - suffix.length)}-${suffix}`;
+		for (let suffix = 2; suffix <= 99; suffix++) {
+			const candidate = clamp(String(suffix));
+			if (!held(candidate)) return candidate;
+		}
+		return clamp(token.slice(0, 4));
+	}
+
+	/** Scope roster rows for every attached instance except `excludeToken`. */
+	#ircScopeRows(excludeToken: string): IrcPeerRecord[] {
+		const rows: IrcPeerRecord[] = [];
+		for (const [token, entry] of this.#ircInstances) {
+			if (token === excludeToken) continue;
+			for (const agent of entry.agents.values()) rows.push({ ...agent, instance: entry.name });
+		}
+		return rows;
+	}
+
+	/** Fail every pending `irc.send` delivery addressed to `targetToken` (peer detached or disconnected). */
+	#failIrcDeliveriesForToken(targetToken: string): void {
+		for (const [deliveryId, pending] of this.#ircDeliveries) {
+			if (pending.targetToken !== targetToken) continue;
+			clearTimeout(pending.timer);
+			pending.resolve({
+				outcome: "failed",
+				error: `Peer "${pending.to}" is no longer reachable — no omp process named "${pending.instanceName}" is attached to this project scope.`,
+			});
+			this.#ircDeliveries.delete(deliveryId);
+		}
+	}
+
+	/** Push each attached instance's scope roster (excluding its own rows) to its socket. */
+	#broadcastIrcRoster(): void {
+		for (const [token, entry] of this.#ircInstances) {
+			if (entry.socket.destroyed) continue;
+			entry.socket.write(`${JSON.stringify({ event: "irc-roster", peers: this.#ircScopeRows(token) })}\n`);
+		}
+	}
+
+	#ircBinding(socket: net.Socket, token: string): void {
+		if (this.#ircSockets.get(socket) !== token)
+			throw new Error("Daemon broker irc token is not bound to this connection");
+	}
+
+	async #ircSync(
+		operation: Extract<DaemonOperation, { op: "irc.sync" }>,
+		socket: net.Socket,
+	): Promise<DaemonRpcResult> {
+		for (const agent of operation.agents) {
+			if (agent.id.includes("/")) throw new Error('Agent id must not contain "/"');
+		}
+		parseIrcInstanceName(operation.name, "operation.name");
+		const existing = this.#ircInstances.get(operation.token);
+		if (existing && existing.socket !== socket) {
+			this.#ircSockets.delete(existing.socket);
+		}
+		const granted = this.#grantIrcName(operation.token, operation.name);
+		this.#ircSockets.set(socket, operation.token);
+		this.#ircInstances.set(operation.token, {
+			socket,
+			name: granted,
+			agents: new Map(operation.agents.map(agent => [agent.id, agent])),
+		});
+		this.#broadcastIrcRoster();
+		return { op: "irc.sync", instance: granted, peers: this.#ircScopeRows(operation.token) };
+	}
+
+	async #ircList(
+		operation: Extract<DaemonOperation, { op: "irc.list" }>,
+		socket: net.Socket,
+	): Promise<DaemonRpcResult> {
+		this.#ircBinding(socket, operation.token);
+		return { op: "irc.list", peers: this.#ircScopeRows(operation.token) };
+	}
+
+	async #ircDetach(
+		operation: Extract<DaemonOperation, { op: "irc.detach" }>,
+		socket: net.Socket,
+	): Promise<DaemonRpcResult> {
+		this.#ircBinding(socket, operation.token);
+		this.#ircSockets.delete(socket);
+		this.#ircInstances.delete(operation.token);
+		this.#failIrcDeliveriesForToken(operation.token);
+		this.#broadcastIrcRoster();
+		return { op: "irc.detach" };
+	}
+
+	async #ircSend(
+		operation: Extract<DaemonOperation, { op: "irc.send" }>,
+		socket: net.Socket,
+	): Promise<DaemonRpcResult> {
+		this.#ircBinding(socket, operation.token);
+		const { instance, id } = parseIrcId(operation.message.to);
+		const resolved = instance === undefined ? undefined : this.#resolveIrcName(instance);
+		if (!instance || !resolved || resolved.entry.socket.destroyed) {
+			return {
+				op: "irc.send",
+				outcome: "failed",
+				error: `Peer "${operation.message.to}" is no longer reachable — no omp process named "${instance ?? operation.message.to}" is attached to this project scope.`,
+			};
+		}
+		if (!resolved.entry.agents.has(id)) {
+			return {
+				op: "irc.send",
+				outcome: "failed",
+				error: `Unknown agent "${operation.message.to}" — check \`hub list\` for live peers.`,
+			};
+		}
+		const deliveryId = crypto.randomUUID();
+		const { promise, resolve } = Promise.withResolvers<{ outcome: IrcDeliveryOutcome; error?: string }>();
+		const timer = setTimeout(() => {
+			resolve({
+				outcome: "failed",
+				error: `Peer "${operation.message.to}" did not acknowledge delivery within ${operation.timeoutMs}ms.`,
+			});
+			this.#ircDeliveries.delete(deliveryId);
+		}, operation.timeoutMs);
+		timer.unref?.();
+		this.#ircDeliveries.set(deliveryId, {
+			targetToken: resolved.token,
+			resolve,
+			timer,
+			to: operation.message.to,
+			instanceName: resolved.entry.name,
+		});
+		try {
+			resolved.entry.socket.write(
+				`${JSON.stringify({
+					event: "irc-incoming",
+					deliveryId,
+					message: operation.message,
+					expectsReply: operation.expectsReply,
+				})}\n`,
+			);
+		} catch {
+			const pending = this.#ircDeliveries.get(deliveryId);
+			if (pending) {
+				clearTimeout(pending.timer);
+				pending.resolve({
+					outcome: "failed",
+					error: `Peer "${operation.message.to}" is no longer reachable — no omp process named "${instance}" is attached to this project scope.`,
+				});
+				this.#ircDeliveries.delete(deliveryId);
+			}
+		}
+		const { outcome, error } = await promise;
+		return { op: "irc.send", outcome, error };
+	}
+
+	async #ircAck(operation: Extract<DaemonOperation, { op: "irc.ack" }>, socket: net.Socket): Promise<DaemonRpcResult> {
+		this.#ircBinding(socket, operation.token);
+		const pending = this.#ircDeliveries.get(operation.deliveryId);
+		if (pending && pending.targetToken === operation.token) {
+			clearTimeout(pending.timer);
+			pending.resolve({ outcome: operation.outcome, error: operation.error });
+			this.#ircDeliveries.delete(operation.deliveryId);
+		}
+		return { op: "irc.ack" };
 	}
 
 	async #start(spec: DaemonSpec, owner?: string): Promise<DaemonRpcResult> {
@@ -1308,7 +1530,8 @@ class DaemonBroker {
 						if ("pendingCompletions" in decoded && Array.isArray(decoded.pendingCompletions)) {
 							return decoded.pendingCompletions.map(value => {
 								const message = parseDaemonWireMessage(value);
-								if (!("event" in message)) throw new Error("Pending daemon completion is not an event");
+								if (!("event" in message) || message.event !== "daemon-completed")
+									throw new Error("Pending daemon completion is not an event");
 								return message;
 							});
 						}
