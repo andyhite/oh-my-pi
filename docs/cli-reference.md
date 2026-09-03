@@ -64,6 +64,7 @@ Argument handling:
 | `--alias <name>` | Create a shell shortcut for the selected profile and exit. |
 | `--config <file>` | Load an extra `config.yml`-style overlay for this run (repeatable). |
 | `--session-dir <dir>` | Directory for session storage and lookup. |
+| `--name <peer>` | Peer name for this process in cross-process hub messaging (default: generated). |
 | `--no-session` | Don't save the session (ephemeral). |
 
 #### Session history

@@ -1,12 +1,12 @@
-Agent coordination: peer messaging, background-job control, and supervised long-running processes. Main agent is `Main`; subagents inherit task ID.
-Use `op: "list"` to discover live peers. Default is running+idle plus running/idle/parked/shown/truncated counts — never an unbounded parked name dump. Pass `status: "parked"` for parked archaeology; optional `limit` bounds rows (default 32, max 100). Address peers by exact roster ID — NEVER invent names. `send` to a known parked id still revives it; `history://<id>` and `agent://<id>` stay readable.
+Agent coordination: peer messaging, background-job control, and supervised long-running processes. Main agent is `Main`; subagents inherit task ID. Agents in other omp processes on this project appear as `<peer-name>/<agent-id>`; bare ids live in your own process, whose name `list` reports.
+Use `op: "list"` to discover live peers. Default is running+idle plus running/idle/parked/shown/truncated counts — never an unbounded parked name dump. Pass `status: "parked"` for parked archaeology; optional `limit` bounds all rows, local and cross-process combined (default 32, max 100). Address peers by exact roster ID — NEVER invent names. A `<peer-name>/<agent-id>` row is an agent in another omp process: message it exactly like a local peer. A bare id that several processes advertise is ambiguous — use the qualified form. `send` to a known parked id still revives it; `history://<id>` and `agent://<id>` stay readable.
 
 # Messaging & Jobs
 
 Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`/`wait` observes a settled job first, that snapshot is the delivery and suppresses duplicate `async-result`.
 
 - **The user is NOT a peer.** `Main` answers the user ONLY in a plain text block; a `send` shows them a tool-card preview (2 lines while collapsed). Thinking is not output either.
-- **`send`** (with `to`): fire-and-forget, NEVER blocks. Delivery receipts (`delivered`/`failed`) immediate; `failed` → peer gone, don't retry.
+- **`send`** (with `to`): fire-and-forget, NEVER blocks. `to:"all"` broadcasts to every live peer, local AND cross-process. Delivery receipts (`delivered`/`failed`) immediate; `failed` → don't retry — it can mean the recipient's omp process detached or was renamed, that the specific agent is gone while its process is still attached, or that the 10s cross-process ack timed out; re-check `list`. `history://` and `agent://` stay process-local — reading `history://<id>` for a remote peer returns "Unknown agent".
   Sending wakes `idle`/`parked` peers. Answering: lead with answer, NEVER quote, set `replyTo`.
 - **Format**: plain prose ONLY. No JSON status objects. Share paths via `local://`/`artifact://` URLs, not pasted blobs.
 - **`wait`**: use ONLY when completely blocked with no other work. Returns on the FIRST of: an incoming message, a watched job finishing, the wait window elapsing, or a steering interrupt — NOT when all jobs finish; re-issue to keep waiting.

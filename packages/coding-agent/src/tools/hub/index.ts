@@ -63,6 +63,7 @@ import {
 	messagingRenderCall,
 	messagingRenderResult,
 	normalizeIrcTimeoutMs,
+	resolveWaitFrom,
 } from "./messaging";
 import {
 	DEFAULT_HUB_LIST_LIMIT,
@@ -81,7 +82,9 @@ const hubSchema = type({
 	op: type(
 		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
 	).describe("hub operation"),
-	"to?": type("string").describe('send: recipient agent id or "all"'),
+	"to?": type("string").describe(
+		'send: recipient agent id, or "all" to broadcast to every live peer (local and cross-process)',
+	),
 	"message?": type("string").describe("send: message body"),
 	"replyTo?": type("string").describe("send: message id being answered"),
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
@@ -372,7 +375,13 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		const messaging = this.#messaging();
 		const manager = this.session.asyncJobManager;
 		const ownerId = this.#ownerId();
-		const from = params.from?.trim() || undefined;
+		const rawFrom = params.from?.trim() || undefined;
+		let from = rawFrom;
+		if (messaging && rawFrom) {
+			const resolvedFrom = await resolveWaitFrom(messaging, rawFrom);
+			if (resolvedFrom.error) return resolvedFrom.error;
+			from = resolvedFrom.from;
+		}
 
 		// A message already buffered on the session satisfies the wait first.
 		if (messaging) {
@@ -413,9 +422,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				// A bare wait can only be satisfied by a running peer eventually
 				// sending something; with none, return the snapshot immediately
 				// instead of blocking a full message-timeout window.
-				const hasRunningPeer = messaging.registry
-					.listVisibleTo(messaging.senderId)
-					.some(ref => messaging.registry.isRunning(ref));
+				const hasRunningPeer = messaging.registry.hasRunningPeer(messaging.senderId);
 				if (!hasRunningPeer) return nothingToWaitForResult(this.session);
 			}
 			return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);

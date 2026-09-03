@@ -189,6 +189,7 @@
 ### Removed
 
 - Removed the bundled `designer` subagent and `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
+- Agents in other `omp` processes on the same project now appear in `hub list` as `<peer-name>/<agent-id>` and can be messaged directly; set a process's peer name with `--name` or `/peer`, or disable with the `irc.crossProcess` setting.
 
 ## [18.1.3] - 2026-09-02
 

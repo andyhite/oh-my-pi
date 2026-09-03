@@ -15,6 +15,7 @@ import { formatAge, formatDuration } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcAwaitTargetStopped, IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
+import { qualifyIrcId, resolvePeerTarget } from "../../irc/identity";
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
@@ -91,7 +92,9 @@ function countAddressable(refs: { status: string }[]): Pick<HubRosterCounts, "ru
 }
 
 function formatRosterSummary(counts: HubRosterCounts, emptyNoun: string): string {
-	const tally = `running ${counts.running}, idle ${counts.idle}, parked ${counts.parked}; shown ${counts.shown}, truncated ${counts.truncated}`;
+	const tally =
+		`running ${counts.running}, idle ${counts.idle}, parked ${counts.parked}; shown ${counts.shown}, truncated ${counts.truncated}` +
+		(counts.remote > 0 ? `, remote ${counts.remote}` : "");
 	if (counts.shown === 0) {
 		return counts.running + counts.idle + counts.parked === 0
 			? `No other agents (${tally}).`
@@ -169,37 +172,78 @@ export async function executeList(
 		.filter(ref => isAddressablePeer(ref, senderId) && isCurrentSessionRosterRef(ref, rootSessionFile));
 
 	const selected = selectListRefs(registry, senderId, params.status, rootSessionFile);
-	selected.sort(
+
+	const bus = IrcBus.global();
+	const localInstance = bus.remoteInstance();
+	await bus.refreshRemote();
+	// Overlay rows are cross-process peers; a parked-status query is local-only
+	// (remote peers are never advertised as parked).
+	const remotePeers =
+		params.status === "parked"
+			? []
+			: registry
+					.listRemotePeers()
+					.filter(peer => peer.id !== senderId && (!params.status || peer.status === params.status));
+
+	// Local and remote rows share one page: the limit and truncation count
+	// apply to the merged, sorted roster so an instance with many attached
+	// cross-process peers cannot blow past `limit` total rows.
+	const merged = [
+		...selected.map(ref => ({ ...ref, remote: false as const })),
+		...remotePeers.map(peer => ({ ...peer, remote: true as const })),
+	];
+	merged.sort(
 		(a, b) =>
 			(LIST_STATUS_ORDER[a.status] ?? 9) - (LIST_STATUS_ORDER[b.status] ?? 9) || b.lastActivity - a.lastActivity,
 	);
 	const limit = resolveHubListLimit(params.limit);
-	const truncated = Math.max(0, selected.length - limit);
-	const shownRefs = truncated > 0 ? selected.slice(0, limit) : selected;
+	const truncated = Math.max(0, merged.length - limit);
+	const shown = truncated > 0 ? merged.slice(0, limit) : merged;
+	const shownRefs = shown.filter(row => !row.remote);
+	const shownRemotePeers = shown.filter(row => row.remote);
+
 	const counts: HubRosterCounts = {
-		...countAddressable(refs.filter(ref => isAddressablePeer(ref, senderId))),
-		shown: shownRefs.length,
+		...countAddressable([...refs.filter(ref => isAddressablePeer(ref, senderId)), ...remotePeers]),
+		shown: shown.length,
 		truncated,
+		remote: shownRemotePeers.length,
 	};
 
-	const bus = IrcBus.global();
-	const peers = shownRefs.map(ref => ({
-		id: ref.id,
-		displayName: ref.displayName,
-		kind: ref.kind,
-		status: ref.status,
-		parentId: ref.parentId,
-		unread: bus.unreadCount(ref.id),
-		lastActivity: ref.lastActivity,
-		activity: ref.activity,
-	}));
+	const peers = [
+		...shownRefs.map(ref => ({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: ref.kind,
+			status: ref.status,
+			parentId: ref.parentId,
+			unread: bus.unreadCount(ref.id),
+			lastActivity: ref.lastActivity,
+			activity: ref.activity,
+		})),
+		...shownRemotePeers.map(peer => ({
+			id: peer.id,
+			displayName: peer.displayName,
+			kind: peer.kind,
+			status: peer.status,
+			parentId: peer.parentId,
+			unread: 0,
+			lastActivity: peer.lastActivity,
+			activity: peer.activity,
+			instance: peer.instance,
+			remote: true,
+		})),
+	];
 	const lines = [formatRosterSummary(counts, params.status ? `${params.status} peers` : "actionable peers")];
+	if (localInstance) {
+		lines.unshift(`You are \`${localInstance}\` — peers address your agents as \`${localInstance}/<agent-id>\`.`);
+	}
 	for (const peer of peers) {
 		const extras = [
 			peer.activity || undefined,
 			peer.unread > 0 ? `unread ${peer.unread}` : undefined,
 			peer.parentId ? `parent ${peer.parentId}` : undefined,
 			`active ${formatDuration(Date.now() - peer.lastActivity)} ago`,
+			"remote" in peer && peer.remote ? "remote" : undefined,
 		].filter(Boolean);
 		lines.push(`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
 	}
@@ -213,7 +257,13 @@ export async function executeList(
 	}
 	return {
 		content: [{ type: "text", text: lines.join("\n") }],
-		details: { op: "list", from: senderId, peers, counts },
+		details: {
+			op: "list",
+			from: senderId,
+			peers,
+			counts,
+			...(localInstance ? { instance: localInstance } : {}),
+		},
 	};
 }
 
@@ -239,10 +289,32 @@ export async function executeSend(
 	if (!message) {
 		return hubErrorResult('`message` is required for op="send".', { op: "send", from: senderId });
 	}
-	if (to === senderId) {
+	const bus = IrcBus.global();
+	const localInstance = bus.remoteInstance();
+	const isBroadcastTarget = to === "all";
+	// A direct send may address a parked id that another root's scan (or a
+	// prior list) restored into this process-global registry. Refresh this
+	// caller's persisted roster once *before* resolving the target, so a
+	// same-named parked local peer is restored into the registry and wins
+	// over a same-id remote overlay entry — never requiring a prior `list`.
+	// Broadcasts address no id and fan out to live peers only, so they skip
+	// the refresh. A missing caller session hint keeps the existing
+	// in-memory behavior: no root is guessed from the registry or cwd.
+	if (!isBroadcastTarget && sessionFileHint) {
+		await ensurePersistedRoster(registry, sessionFileHint);
+	}
+	const resolved = resolvePeerTarget(registry, to, localInstance);
+	if (resolved.kind === "ambiguous") {
+		return hubErrorResult(
+			`Ambiguous peer "${resolved.id}" — ${resolved.candidates.length} omp processes advertise it: ${resolved.candidates.join(", ")}. Address one explicitly.`,
+			{ op: "send", from: senderId, to },
+		);
+	}
+	const canonicalTo = resolved.kind === "local" || resolved.kind === "remote" ? resolved.id : to;
+	if (to === senderId || (localInstance && to === qualifyIrcId(localInstance, senderId))) {
 		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	}
-	const isBroadcast = to === "all";
+	const isBroadcast = resolved.kind === "broadcast";
 	if (isBroadcast && params.await) {
 		return hubErrorResult('`await` is invalid with to:"all" — broadcasts have no single replier.', {
 			op: "send",
@@ -250,19 +322,7 @@ export async function executeSend(
 			to,
 		});
 	}
-	// A direct send may address a parked id that another root's scan (or a
-	// prior list) restored into this process-global registry. Refresh this
-	// caller's persisted roster once before the bus resolves the target, so a
-	// same-named parked ref (and the revival that follows it) targets this
-	// root's transcript — never requiring a prior `list`. Broadcasts address
-	// no id and fan out to live peers only, so they skip the refresh. A
-	// missing caller session hint keeps the existing in-memory behavior: no
-	// root is guessed from the registry or cwd.
-	if (!isBroadcast && sessionFileHint) {
-		await ensurePersistedRoster(registry, sessionFileHint);
-	}
 
-	const bus = IrcBus.global();
 	let waited: IrcMessage | null | undefined;
 	const timeoutMs = params.await ? resolveMessageTimeoutMs(settings, params.timeoutMs) : undefined;
 	const awaitAbort = params.await ? new AbortController() : undefined;
@@ -270,9 +330,9 @@ export async function executeSend(
 	let removeAwaitAbortListener: (() => void) | undefined;
 	const waiting = params.await
 		? bus
-				.wait(senderId, { from: to }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
+				.wait(senderId, { from: canonicalTo }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
 					drainPending: false,
-					awaitTarget: { registry, target: to },
+					awaitTarget: { registry, target: canonicalTo },
 				})
 				.then(
 					message => ({ message, error: null as Error | null }),
@@ -298,7 +358,9 @@ export async function executeSend(
 		// Broadcasts fan out to live peers only (running | idle); reviving every
 		// parked agent on a broadcast would be a stampede. Direct sends go
 		// through the bus unfiltered so parked recipients are revived.
-		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
+		const targets = isBroadcast
+			? [...registry.listVisibleTo(senderId).map(ref => ref.id), ...registry.listRemotePeers().map(peer => peer.id)]
+			: [canonicalTo];
 		// A broadcast that also reaches the main agent delivers the body to it
 		// directly (its own incoming card); relaying the sibling legs to the
 		// main UI would then show the same body once per other recipient.
@@ -342,8 +404,10 @@ export async function executeSend(
 						// still succeeded, so surface a clean note instead of erroring
 						// out — and settle now rather than blocking the full timeout.
 						lines.push(
-							`${to} stopped without replying. ` +
-								`Check \`inbox\` or their transcript (history://${to}) for a later answer.`,
+							resolved.kind === "remote"
+								? `${to} stopped without replying. Check \`inbox\` for a later answer.`
+								: `${to} stopped without replying. ` +
+										`Check \`inbox\` or their transcript (history://${to}) for a later answer.`,
 						);
 					} else if (signal?.aborted) {
 						// The send already succeeded; if the wait was interrupted by our
@@ -393,15 +457,63 @@ export async function executeSend(
 	}
 }
 
+/**
+ * Canonicalize a `wait`/`from` id against the process-global registry,
+ * refreshing this caller's persisted roster first so a not-yet-restored
+ * parked local peer wins over a same-id remote overlay entry. Shared by
+ * `executeMessageWait` and the hub tool's fast-path drains so a cross-process
+ * `from` (stored qualified) is recognized consistently everywhere.
+ */
+export async function resolveWaitFrom(
+	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
+	rawFrom: string | undefined,
+): Promise<
+	{ from: string | undefined; error?: undefined } | { from?: undefined; error: AgentToolResult<CoordinationDetails> }
+> {
+	if (!rawFrom) return { from: undefined };
+	if (deps.sessionFileHint) {
+		await ensurePersistedRoster(deps.registry, deps.sessionFileHint);
+	}
+	const resolved = resolvePeerTarget(deps.registry, rawFrom, IrcBus.global().remoteInstance());
+	if (resolved.kind === "ambiguous") {
+		return {
+			error: hubErrorResult(
+				`Ambiguous peer "${resolved.id}" — ${resolved.candidates.length} omp processes advertise it: ${resolved.candidates.join(", ")}. Address one explicitly.`,
+				{ op: "wait", from: deps.senderId },
+			),
+		};
+	}
+	return { from: resolved.kind === "local" || resolved.kind === "remote" ? resolved.id : rawFrom };
+}
+
 /** Pure message wait: no jobs in play, block on the bus with peer liveness. */
 export async function executeMessageWait(
-	deps: { registry: AgentRegistry; senderId: string; settings: Settings },
+	deps: { registry: AgentRegistry; senderId: string; settings: Settings; sessionFileHint?: string | null },
 	params: { from?: string; timeoutMs?: number },
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	const { registry, senderId, settings } = deps;
-	const from = params.from?.trim() || undefined;
+	const { registry, senderId, settings, sessionFileHint } = deps;
+	const rawFrom = params.from?.trim() || undefined;
 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
+	// Refreshing the roster is only awaited when there is actually a roster to
+	// refresh, so the common case (no session hint, or a bare wait) reaches
+	// `IrcBus.global().wait` below without crossing a microtask boundary —
+	// that call's own waiter registration is synchronous, so the caller can
+	// rely on the waiter being parked by the time this call first yields.
+	let from = rawFrom;
+	if (rawFrom) {
+		if (sessionFileHint) {
+			await ensurePersistedRoster(registry, sessionFileHint);
+		}
+		const resolved = resolvePeerTarget(registry, rawFrom, IrcBus.global().remoteInstance());
+		if (resolved.kind === "ambiguous") {
+			return hubErrorResult(
+				`Ambiguous peer "${resolved.id}" — ${resolved.candidates.length} omp processes advertise it: ${resolved.candidates.join(", ")}. Address one explicitly.`,
+				{ op: "wait", from: senderId },
+			);
+		}
+		from = resolved.kind === "local" || resolved.kind === "remote" ? resolved.id : rawFrom;
+	}
 	try {
 		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
 			liveness: { registry, senderId },
@@ -756,6 +868,7 @@ function renderListResult(details: Partial<CoordinationDetails>, expanded: boole
 			(LIST_STATUS_ORDER[a.status] ?? 9) - (LIST_STATUS_ORDER[b.status] ?? 9) || b.lastActivity - a.lastActivity,
 	);
 	const rosterCounts = details.counts;
+	const instanceSuffix = details.instance ? [`as ${details.instance}`] : [];
 	if (peers.length === 0) {
 		const meta =
 			rosterCounts && rosterCounts.running + rosterCounts.idle + rosterCounts.parked > 0
@@ -764,8 +877,10 @@ function renderListResult(details: Partial<CoordinationDetails>, expanded: boole
 						`${rosterCounts.idle} idle`,
 						`${rosterCounts.parked} parked`,
 						...(rosterCounts.truncated > 0 ? [`${rosterCounts.truncated} truncated`] : []),
+						...(rosterCounts.remote > 0 ? [`${rosterCounts.remote} remote`] : []),
+						...instanceSuffix,
 					]
-				: ["no other agents"];
+				: ["no other agents", ...instanceSuffix];
 		return [renderStatusLine({ icon: "info", title: "IRC peers", meta }, theme)];
 	}
 	const counts = new Map<string, number>();
@@ -776,8 +891,10 @@ function renderListResult(details: Partial<CoordinationDetails>, expanded: boole
 				`${rosterCounts.idle} idle`,
 				`${rosterCounts.parked} parked`,
 				...(rosterCounts.truncated > 0 ? [`${rosterCounts.truncated} truncated`] : []),
+				...(rosterCounts.remote > 0 ? [`${rosterCounts.remote} remote`] : []),
+				...instanceSuffix,
 			]
-		: [...counts].map(([status, count]) => `${count} ${status}`);
+		: [...[...counts].map(([status, count]) => `${count} ${status}`), ...instanceSuffix];
 	const unreadTotal = peers.reduce((sum, peer) => sum + peer.unread, 0);
 	if (unreadTotal > 0) meta.push(theme.fg("warning", `${unreadTotal} unread`));
 	const header = renderStatusLine({ iconOverride: ircGlyph(theme), title: "IRC peers", meta }, theme);
@@ -790,10 +907,11 @@ function renderListResult(details: Partial<CoordinationDetails>, expanded: boole
 			renderItem: peer => {
 				const kindText = peer.parentId ? `${peer.kind}${theme.sep.dot}of ${peer.parentId}` : peer.kind;
 				const unread = peer.unread > 0 ? ` ${formatBadge(`${peer.unread} unread`, "warning", theme)}` : "";
+				const remote = peer.remote ? ` ${formatBadge("remote", "muted", theme)}` : "";
 				const age = messageAge(peer.lastActivity);
 				const activity = peer.activity ? ` ${theme.fg("dim", replaceTabs(peer.activity))}` : "";
 				const name = theme.fg("dim", replaceTabs(peer.displayName));
-				return `${peerStatusBadge(peer.status, theme)} ${theme.bold(replaceTabs(peer.id))} ${name} ${theme.fg("dim", kindText)}${activity}${unread}${age ? ` ${theme.fg("dim", age)}` : ""}`;
+				return `${peerStatusBadge(peer.status, theme)} ${theme.bold(replaceTabs(peer.id))} ${name} ${theme.fg("dim", kindText)}${activity}${unread}${remote}${age ? ` ${theme.fg("dim", age)}` : ""}`;
 			},
 		},
 		theme,

@@ -59,6 +59,8 @@ import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
+import { initInstanceName } from "./irc/instance";
+import { attachCrossProcessIrc } from "./irc/remote";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
@@ -1809,6 +1811,11 @@ export async function runRootCommand(
 		await pluginPreloadPromise;
 		if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
 			await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
+			initInstanceName(parsedArgs.name);
+			void logger.time("attachCrossProcessIrc", attachCrossProcessIrc, {
+				cwd,
+				settings: settingsInstance,
+			});
 		}
 
 		scheduleMarketplaceAutoUpdate({

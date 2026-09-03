@@ -114,6 +114,25 @@ export interface RegisterInput {
 	history?: AgentHistorySummary;
 }
 
+/** A peer owned by another omp process in the same daemon scope. */
+export interface RemoteAgentPeer {
+	/** Fully qualified: `<instance-name>/<local id>`. */
+	id: string;
+	/** Owning instance's broker-granted name. */
+	instance: string;
+	/** Id as the owning process knows it. */
+	localId: string;
+	displayName: string;
+	kind: "main" | "sub";
+	/** Qualified parent id, when the peer has one. */
+	parentId?: string;
+	status: "running" | "idle";
+	/** Owner-corroborated run state (its own `isRunning`). */
+	live: boolean;
+	lastActivity: number;
+	activity?: string;
+}
+
 export class AgentRegistry {
 	static #global: AgentRegistry | undefined;
 
@@ -131,6 +150,8 @@ export class AgentRegistry {
 
 	readonly #refs = new Map<string, AgentRef>();
 	readonly #listeners = new Set<RegistryListener>();
+	readonly #remotePeers = new Map<string, RemoteAgentPeer>();
+	readonly #remoteListeners = new Set<() => void>();
 
 	#matchesExpected(ref: AgentRef, expected?: AgentRefExpectation): boolean {
 		return expected === undefined || ref === expected || ref.session === expected;
@@ -298,6 +319,47 @@ export class AgentRegistry {
 	onChange(listener: RegistryListener): () => void {
 		this.#listeners.add(listener);
 		return () => this.#listeners.delete(listener);
+	}
+
+	/** Replace the cross-process peer overlay wholesale, then notify remote-change listeners. */
+	setRemotePeers(peers: RemoteAgentPeer[]): void {
+		this.#remotePeers.clear();
+		for (const peer of peers) {
+			this.#remotePeers.set(peer.id, peer);
+		}
+		this.#emitRemoteChange();
+	}
+
+	listRemotePeers(): RemoteAgentPeer[] {
+		return [...this.#remotePeers.values()];
+	}
+
+	getRemotePeer(id: string): RemoteAgentPeer | undefined {
+		return this.#remotePeers.get(id);
+	}
+
+	onRemoteChange(listener: () => void): () => void {
+		this.#remoteListeners.add(listener);
+		return () => this.#remoteListeners.delete(listener);
+	}
+
+	/** Whether a running peer (local or cross-process) satisfies the given filter, for the `hub wait` liveness gate. */
+	hasRunningPeer(selfId: string, from?: string): boolean {
+		if (this.listVisibleTo(selfId).some(ref => this.isRunning(ref) && (!from || ref.id === from))) return true;
+		for (const peer of this.#remotePeers.values()) {
+			if (peer.live && peer.status === "running" && (!from || peer.id === from)) return true;
+		}
+		return false;
+	}
+
+	#emitRemoteChange(): void {
+		for (const listener of this.#remoteListeners) {
+			try {
+				listener();
+			} catch {
+				// listeners must not break the dispatch loop
+			}
+		}
 	}
 
 	#emit(event: RegistryEvent): void {

@@ -146,6 +146,7 @@ describe("hub list", () => {
 			running: 1,
 			idle: 1,
 			parked: 1,
+			remote: 0,
 			shown: 2,
 			truncated: 0,
 		});
@@ -192,6 +193,7 @@ describe("hub list", () => {
 			running: 0,
 			idle: 1,
 			parked: 1,
+			remote: 0,
 			shown: 1,
 			truncated: 0,
 		});
@@ -227,6 +229,7 @@ describe("hub list", () => {
 			running: 0,
 			idle: DEFAULT_HUB_LIST_LIMIT + extra,
 			parked: 0,
+			remote: 0,
 			shown: DEFAULT_HUB_LIST_LIMIT,
 			truncated: extra,
 		});
@@ -264,6 +267,7 @@ describe("hub list", () => {
 			running: 0,
 			idle: 0,
 			parked: MAX_HUB_LIST_LIMIT + extra,
+			remote: 0,
 			shown: MAX_HUB_LIST_LIMIT,
 			truncated: extra,
 		});
@@ -298,6 +302,7 @@ describe("hub list", () => {
 			running: 0,
 			idle: 1,
 			parked: 0,
+			remote: 0,
 			shown: 1,
 			truncated: 0,
 		});
@@ -365,6 +370,7 @@ describe("hub list", () => {
 				running: 0,
 				idle: 1,
 				parked: 0,
+				remote: 0,
 				shown: 1,
 				truncated: 0,
 			});
@@ -379,6 +385,7 @@ describe("hub list", () => {
 				running: 0,
 				idle: 1,
 				parked: 1,
+				remote: 0,
 				shown: 1,
 				truncated: 0,
 			});
@@ -414,6 +421,7 @@ describe("hub list", () => {
 			running: 0,
 			idle: 0,
 			parked: 0,
+			remote: 0,
 			shown: 0,
 			truncated: 0,
 		});
@@ -429,6 +437,7 @@ describe("hub list", () => {
 			running: 0,
 			idle: 0,
 			parked: 1,
+			remote: 0,
 			shown: 0,
 			truncated: 0,
 		});
@@ -466,6 +475,7 @@ describe("hub list", () => {
 				running: 0,
 				idle: 0,
 				parked: 0,
+				remote: 0,
 				shown: 0,
 				truncated: 0,
 			});
@@ -478,6 +488,7 @@ describe("hub list", () => {
 				running: 0,
 				idle: 0,
 				parked: 1,
+				remote: 0,
 				shown: 0,
 				truncated: 0,
 			});
@@ -527,6 +538,7 @@ describe("hub list", () => {
 					running: 0,
 					idle: 1,
 					parked: 0,
+					remote: 0,
 					shown: 1,
 					truncated: 0,
 				});
@@ -543,6 +555,7 @@ describe("hub list", () => {
 					running: 0,
 					idle: 1,
 					parked: 1,
+					remote: 0,
 					shown: 1,
 					truncated: 0,
 				});
@@ -594,6 +607,7 @@ describe("hub list", () => {
 				running: 0,
 				idle: 1,
 				parked: 0,
+				remote: 0,
 				shown: 1,
 				truncated: 0,
 			});
@@ -684,6 +698,7 @@ describe("hub list", () => {
 			running: 0,
 			idle: 1,
 			parked: 0,
+			remote: 0,
 			shown: 1,
 			truncated: 0,
 		});
@@ -743,6 +758,7 @@ describe("hub list", () => {
 			running: 0,
 			idle: 0,
 			parked: 1,
+			remote: 0,
 			shown: 0,
 			truncated: 0,
 		});
@@ -798,6 +814,7 @@ describe("hub list", () => {
 			running: 0,
 			idle: 1,
 			parked: 1,
+			remote: 0,
 			shown: 1,
 			truncated: 0,
 		});

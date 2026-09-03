@@ -35,6 +35,8 @@ export interface Args {
 	smol?: string;
 	slow?: string;
 	plan?: string;
+	/** Peer name for this omp process (`hub` addresses it as `<name>/<agent-id>`). */
+	name?: string;
 	prewalk?: boolean;
 	noPrewalk?: boolean;
 	prewalkInto?: string;

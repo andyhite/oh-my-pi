@@ -1,4 +1,6 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { IrcBus } from "../irc/bus";
+import { instanceIdentity, sanitizeInstanceName, setInstanceName } from "../irc/instance";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
@@ -478,6 +480,47 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showAgentHub({ initialSection: "activity" });
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "peer",
+		icon: "agents",
+		description: "Show or set this process's peer name for cross-process hub messaging",
+		inlineHint: "[<name>]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const requested = command.args.trim();
+			const crossProcessEnabled = runtime.settings.get("irc.crossProcess") !== false;
+			if (!requested) {
+				const identity = instanceIdentity();
+				const attached = IrcBus.global().remoteInstance() !== undefined;
+				await runtime.output(
+					attached
+						? `Peer name: ${identity.name} — peers address your agents as ${identity.name}/<agent-id>.`
+						: crossProcessEnabled
+							? `Peer name: ${identity.name} (cross-process messaging is enabled but not currently attached to the project broker; only local agent ids are addressable).`
+							: `Peer name: ${identity.name} (cross-process messaging is off; only local agent ids are addressable).`,
+				);
+				return commandConsumed();
+			}
+			const sanitized = sanitizeInstanceName(requested);
+			if (!sanitized) return usage("Usage: /peer <name> (letters, numbers, underscores, hyphens)", runtime);
+			const attached = IrcBus.global().remoteInstance() !== undefined;
+			setInstanceName(sanitized);
+			// Resolves once the bridge re-synced and adopted the broker's grant,
+			// immediately when no transport is attached.
+			await IrcBus.global().syncRemoteIdentity();
+			const granted = instanceIdentity().name;
+			await runtime.output(
+				!attached
+					? crossProcessEnabled
+						? `Peer name set to ${granted} (cross-process messaging is enabled but not currently attached to the project broker; it applies once attached).`
+						: `Peer name set to ${granted} (cross-process messaging is off; it applies if it turns on).`
+					: granted === sanitized
+						? `Peer name set to ${granted}.`
+						: `Peer name set to ${granted} ("${sanitized}" was taken by another omp process in this project).`,
+			);
+			return commandConsumed();
 		},
 	},
 	{
