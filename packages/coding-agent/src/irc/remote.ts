@@ -1,11 +1,3 @@
-/**
- * Cross-process bridge: attaches this process's IrcBus + AgentRegistry to the
- * project scope's daemon broker, so `hub` messaging can reach agents owned by
- * other omp processes open on the same project. See
- * `local://hub-cross-process-design.md` and the execution plan for the wire
- * protocol; this module is the client-side glue only.
- */
-
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { daemonClientForProject, type IrcAttachment } from "../launch/client";
