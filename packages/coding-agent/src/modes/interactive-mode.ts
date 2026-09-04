@@ -209,6 +209,7 @@ import {
 	describeLoopLimit,
 	describeLoopLimitRuntime,
 	isLoopDurationExpired,
+	isLoopLimitExhausted,
 	type LoopLimitRuntime,
 	parseLoopArgs,
 } from "./loop-limit";
@@ -1805,6 +1806,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		// An exhausted budget ends the loop regardless of the condition, so check
+		// it first: the user's command must not run one last time for nothing.
+		if (isLoopLimitExhausted(this.loopLimit)) {
+			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
+			return;
+		}
+
 		// The gate sits before the budget consume so a halt never burns an
 		// iteration that did not run, and after the blocked-check/defer above so
 		// a streaming turn cannot re-run the command on every retry tick.
@@ -1836,6 +1844,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!condition) return true;
 
 		const controller = new AbortController();
+		// A prior evaluation can still be in flight when the next iteration
+		// starts (the user submitted mid-command); drop it instead of leaking a
+		// child process that Esc can no longer reach.
+		this.#abortLoopCondition();
 		this.#loopConditionAbort = controller;
 		let verdict: LoopConditionVerdict;
 		try {

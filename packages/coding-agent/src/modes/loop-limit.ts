@@ -101,12 +101,12 @@ function takeLoopLimit(input: string): { limit?: LoopLimitConfig; rest: string }
 	// Bare integer: iteration count, unless the next token is a time unit ("10 minutes").
 	if (/^\d+$/.test(token)) {
 		if (rest) {
-			const restTokens = rest.split(/\s+/);
-			const unitMs = TIME_UNITS_MS.get(restTokens[0].toLowerCase());
+			const unitToken = /^\S+/.exec(rest)?.[0] ?? "";
+			const unitMs = TIME_UNITS_MS.get(unitToken.toLowerCase());
 			if (unitMs !== undefined) {
 				const limit = makeDuration(token, unitMs);
 				if (typeof limit === "string") return limit;
-				return { limit, rest: restTokens.slice(1).join(" ").trim() };
+				return { limit, rest: rest.slice(unitToken.length).trim() };
 			}
 		}
 		const limit = makeIterations(token);
@@ -139,9 +139,10 @@ function takeLoopCondition(input: string): { condition?: LoopConditionConfig; re
 		if (condition) return "Use only one of --while or --until.";
 
 		const afterName = rest.slice(name.length);
-		const value = readFlagValue(afterName.startsWith("=") ? afterName.slice(1) : afterName);
+		const valueText = afterName.startsWith("=") ? afterName.slice(1) : afterName;
+		const value = readFlagValue(valueText);
 		if (value === "unterminated") return `${name} has an unterminated quote.`;
-		if (value === undefined || !value.value.trim()) {
+		if (value === undefined || !value.value.trim() || valueText.trim().startsWith("-")) {
 			return `${name} needs a shell command. Quote it when it contains spaces: /loop ${name} 'bun test'.`;
 		}
 		condition = { command: value.value.trim(), until };
@@ -237,6 +238,19 @@ export function consumeLoopLimitIteration(limit: LoopLimitRuntime | undefined, n
 
 export function isLoopDurationExpired(limit: LoopLimitRuntime | undefined, nowMs = Date.now()): boolean {
 	return limit?.kind === "duration" && nowMs >= limit.deadlineMs;
+}
+
+/**
+ * True when the loop's budget is already spent: a duration past its deadline,
+ * or an iteration count with none remaining. Unlike {@link consumeLoopLimitIteration}
+ * this never mutates the runtime, so callers can check it before deciding
+ * whether to run anything (e.g. a `/loop --while`/`--until` condition command)
+ * that would otherwise run once more for a loop that is already over.
+ */
+export function isLoopLimitExhausted(limit: LoopLimitRuntime | undefined, nowMs = Date.now()): boolean {
+	if (!limit) return false;
+	if (limit.kind === "duration") return nowMs >= limit.deadlineMs;
+	return limit.remaining <= 0;
 }
 
 export function describeLoopLimit(config: LoopLimitConfig): string {

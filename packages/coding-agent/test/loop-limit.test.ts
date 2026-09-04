@@ -109,10 +109,30 @@ describe("loop condition parsing", () => {
 		});
 	});
 
-	test("keeps shell operators inside a quoted condition", () => {
-		expect(parseLoopArgs("--until 'bun test && bun run lint' fix it")).toEqual({
-			condition: { command: "bun test && bun run lint", until: true },
-			prompt: "fix it",
+	// A flag typo like `--until --while 'bun test'` must not silently consume
+	// the next flag (or a bare `-f`-style token) as the command text — that
+	// would only surface as a confusing runtime `exit 127` from the shell
+	// instead of the parse-time error every other malformed flag gets.
+	test("rejects a flag-shaped token as the condition value", () => {
+		expect(parseLoopArgs("--until --while 'bun test'")).toContain("needs a shell command");
+		expect(parseLoopArgs("--until -f GO keep going")).toContain("needs a shell command");
+		// An explicitly quoted value starting with -- is still a real command.
+		expect(parseLoopArgs("--until '--foo'")).toEqual({ condition: { command: "--foo", until: true } });
+	});
+
+	// The two limit spellings below reach the condition through different code
+	// paths (space-separated unit vs. compact unit); both must hand the
+	// remainder to the condition parser without collapsing internal whitespace.
+	test("preserves condition-command whitespace regardless of limit spelling", () => {
+		expect(parseLoopArgs('10 minutes --until "a  b" go')).toEqual({
+			limit: { kind: "duration", durationMs: 600_000 },
+			condition: { command: "a  b", until: true },
+			prompt: "go",
+		});
+		expect(parseLoopArgs('10m --until "a  b" go')).toEqual({
+			limit: { kind: "duration", durationMs: 600_000 },
+			condition: { command: "a  b", until: true },
+			prompt: "go",
 		});
 	});
 

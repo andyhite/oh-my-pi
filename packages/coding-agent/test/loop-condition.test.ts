@@ -71,9 +71,17 @@ describe("evaluateLoopCondition", () => {
 	});
 
 	// Esc during a condition is not a broken condition: the caller has already
-	// paused the loop and must not also print a failure.
+	// paused the loop and must not also print a failure. Deliberate real delay
+	// (see the timeout test above): aborting a real spawned shell process can't
+	// be driven by fake timers, so this must wait for the process to actually
+	// start before aborting it mid-flight — a pre-aborted signal would only
+	// exercise the short-circuit before any process spawns.
 	it("reports a user abort distinctly from a failure", async () => {
-		expect(await run("sleep 30", false, { signal: AbortSignal.abort() })).toEqual({ kind: "aborted" });
+		const controller = new AbortController();
+		const pending = run("sleep 30", false, { signal: controller.signal });
+		await Bun.sleep(50);
+		controller.abort();
+		expect(await pending).toEqual({ kind: "aborted" });
 	});
 
 	it("ignores stdout when it contradicts the exit status", async () => {
