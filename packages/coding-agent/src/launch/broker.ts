@@ -29,6 +29,7 @@ import {
 	type IrcDeliveryOutcome,
 	type IrcPeerRecord,
 	type IrcWireMessage,
+	ircRosterFingerprint,
 	parseDaemonSnapshot,
 	parseDaemonSpec,
 	parseDaemonWireMessage,
@@ -637,8 +638,6 @@ class DaemonBroker {
 				return this.#ircSync(operation, socket);
 			case "irc.detach":
 				return this.#ircDetach(operation, socket);
-			case "irc.list":
-				return this.#ircList(operation, socket);
 			case "irc.send":
 				return this.#ircSend(operation, socket);
 			case "irc.ack":
@@ -692,11 +691,13 @@ class DaemonBroker {
 		}
 	}
 
+	#pushIrcRoster(socket: net.Socket, token: string): void {
+		if (socket.destroyed) return;
+		socket.write(`${JSON.stringify({ event: "irc-roster", peers: this.#ircScopeRows(token) })}\n`);
+	}
+
 	#broadcastIrcRoster(): void {
-		for (const [token, entry] of this.#ircInstances) {
-			if (entry.socket.destroyed) continue;
-			entry.socket.write(`${JSON.stringify({ event: "irc-roster", peers: this.#ircScopeRows(token) })}\n`);
-		}
+		for (const [token, entry] of this.#ircInstances) this.#pushIrcRoster(entry.socket, token);
 	}
 
 	#ircBinding(socket: net.Socket, token: string): void {
@@ -712,23 +713,30 @@ class DaemonBroker {
 		if (existing && existing.socket !== socket) {
 			this.#ircSockets.delete(existing.socket);
 		}
+		// One socket carries at most one irc token: a second attachment on the same
+		// connection must retire the first, or the retired token's entry survives the
+		// socket close (which only evicts the currently-bound token) as an
+		// unreachable ghost row in every peer's roster.
+		const boundToken = this.#ircSockets.get(socket);
+		if (boundToken !== undefined && boundToken !== operation.token) {
+			this.#ircInstances.delete(boundToken);
+			this.#failIrcDeliveriesForToken(boundToken);
+		}
 		const granted = this.#grantIrcName(operation.token, operation.name);
+		const observablyChanged =
+			existing === undefined ||
+			existing.socket !== socket ||
+			existing.name !== granted ||
+			ircRosterFingerprint(existing.agents.values()) !== ircRosterFingerprint(operation.agents);
 		this.#ircSockets.set(socket, operation.token);
 		this.#ircInstances.set(operation.token, {
 			socket,
 			name: granted,
 			agents: new Map(operation.agents.map(agent => [agent.id, agent])),
 		});
-		this.#broadcastIrcRoster();
+		if (observablyChanged) this.#broadcastIrcRoster();
+		else this.#pushIrcRoster(socket, operation.token);
 		return { op: "irc.sync", instance: granted, peers: this.#ircScopeRows(operation.token) };
-	}
-
-	async #ircList(
-		operation: Extract<DaemonOperation, { op: "irc.list" }>,
-		socket: net.Socket,
-	): Promise<DaemonRpcResult> {
-		this.#ircBinding(socket, operation.token);
-		return { op: "irc.list", peers: this.#ircScopeRows(operation.token) };
 	}
 
 	async #ircDetach(

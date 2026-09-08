@@ -2,6 +2,7 @@ import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { IrcBus, type IrcMessage } from "../irc/bus";
+import { isQualifiedIrcId } from "../irc/identity";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircAutoReplyTemplate from "../prompts/system/irc-autoreply.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
@@ -175,6 +176,7 @@ export class IrcBridge {
 				autoReplied: autoReply,
 				interrupting: streaming,
 				relayOnStop,
+				remote: isQualifiedIrcId(msg.from),
 			}),
 			display: true,
 			details: {

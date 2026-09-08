@@ -57,7 +57,7 @@ export interface HubRosterCounts {
 	parked: number;
 	shown: number;
 	truncated: number;
-	/** Cross-process peers among `shown`. */
+	/** Cross-process peers in the roster; a total like `running`/`idle`, not limited to `shown`. */
 	remote: number;
 }
 

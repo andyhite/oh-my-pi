@@ -97,7 +97,6 @@ export type DaemonOperation =
 	// operation on the authenticated socket: same-user processes only.
 	| { op: "irc.sync"; token: string; name: string; agents: IrcAgentRecord[] }
 	| { op: "irc.detach"; token: string }
-	| { op: "irc.list"; token: string }
 	| { op: "irc.send"; token: string; message: IrcWireMessage; expectsReply: boolean; timeoutMs: number }
 	| { op: "irc.ack"; token: string; deliveryId: string; outcome: IrcDeliveryOutcome; error?: string };
 
@@ -121,6 +120,21 @@ export interface IrcAgentRecord {
 /** A scope roster row: an IrcAgentRecord plus the broker-granted name of its owning instance. */
 export interface IrcPeerRecord extends IrcAgentRecord {
 	instance: string;
+}
+
+/**
+ * Stable projection of the roster fields a peer can act on. Excludes volatile
+ * metadata (`lastActivity`, `activity`) so a heartbeat-only roster refresh is
+ * not mistaken for an observable change.
+ */
+export function ircRosterFingerprint(agents: Iterable<IrcAgentRecord>): string {
+	const rows: string[] = [];
+	for (const agent of agents) {
+		rows.push(
+			`${agent.id}\u0000${agent.kind}\u0000${agent.parentId ?? ""}\u0000${agent.status}\u0000${agent.live ? 1 : 0}`,
+		);
+	}
+	return rows.join("\u0001");
 }
 
 /** One message moving between omp instances; `from`/`to` are `<instance>/<agent id>`. */
@@ -175,7 +189,6 @@ export type DaemonRpcResult =
 	| { op: "shutdown" }
 	| { op: "irc.sync"; instance: string; peers: IrcPeerRecord[] }
 	| { op: "irc.detach" }
-	| { op: "irc.list"; peers: IrcPeerRecord[] }
 	| { op: "irc.send"; outcome: IrcDeliveryOutcome; error?: string }
 	| { op: "irc.ack" };
 
@@ -539,7 +552,6 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				agents: source.agents.map(parseIrcAgentRecord),
 			};
 		case "irc.detach":
-		case "irc.list":
 			return { op, token: stringValue(source.token, "operation.token") };
 		case "irc.send":
 			return {
@@ -621,9 +633,6 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 			};
 		case "irc.detach":
 			return { op: "irc.detach" };
-		case "irc.list":
-			if (!Array.isArray(source.peers)) throw new Error("result.peers must be an array");
-			return { op: "irc.list", peers: source.peers.map(parseIrcPeerRecord) };
 		case "irc.send":
 			return {
 				op: "irc.send",

@@ -10,6 +10,7 @@ import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import {
 	type DaemonBrokerClient,
 	createDaemonBrokerClient,
+	daemonBrokerIsListening,
 	type IrcAttachHandlers,
 	type IrcAttachment,
 } from "../../src/launch/client";
@@ -94,6 +95,14 @@ async function setupScope() {
 	// Create the first client (writes broker.token) before starting the broker, which reads it.
 	const first = await newClient();
 	let broker = startBroker(projectDir, runtimeDir);
+	// The in-process broker's listener binds asynchronously; wait for it so a
+	// client's first connect attempt never races ahead and spawns a stray
+	// duplicate broker on this scope's endpoint.
+	const readyDeadline = Date.now() + 5_000;
+	while (!(await daemonBrokerIsListening(projectDir, runtimeDir))) {
+		if (Date.now() > readyDeadline) break;
+		await Bun.sleep(10);
+	}
 
 	async function restartBroker(): Promise<void> {
 		await broker;
@@ -107,6 +116,8 @@ async function setupScope() {
 	}
 
 	return {
+		projectDir,
+		runtimeDir,
 		clients,
 		newClient,
 		restartBroker,
@@ -171,6 +182,58 @@ describe("daemon client irc reconnect handling", () => {
 			expect(firstResult.instance).toBe("Alpha");
 			expect(secondResult).toEqual(firstResult);
 			expect(thirdResult).toEqual(firstResult);
+		} finally {
+			await scope.teardown();
+		}
+	}, 30_000);
+
+	it("does not respawn a broker it deliberately did not start when the connection drops (H2)", async () => {
+		const scope = await setupScope();
+		try {
+			const watcherClient = await scope.newClient();
+			const watcher = makePeer(watcherClient, "Watcher", [agentRecord("Main")]);
+			await watcher.attach.sync();
+
+			let shutdownRequested = false;
+			let clearedAfterShutdown = false;
+			const handlers: IrcAttachHandlers = {
+				token: crypto.randomUUID(),
+				requestedName: () => "NoRespawn",
+				roster: () => [agentRecord("Main")],
+				nameGranted: () => {},
+				incoming: async () => ({ outcome: "woken" }),
+				rosterChanged: peers => {
+					if (peers.length === 0 && shutdownRequested) clearedAfterShutdown = true;
+				},
+				reconnect: false,
+			};
+			const attach: IrcAttachment = scope.clients[0].attachIrc(handlers);
+			await attach.sync();
+			await waitFor(() => watcher.roster.some(row => row.instance === "NoRespawn"));
+
+			// Only needed to give NoRespawn a non-empty roster to observe clearing;
+			// its default reconnect must not respawn the broker after shutdown.
+			watcherClient.close();
+
+			shutdownRequested = true;
+			await scope.clients[0].request({ op: "shutdown" }).catch(() => undefined);
+			await waitFor(() => clearedAfterShutdown, 5_000);
+
+			// Socket teardown (which clears the overlay) precedes the listening
+			// socket's own close/unlink inside the broker's shutdown sequence, so
+			// wait for listening to actually stop before proving it stays stopped.
+			const listeningStoppedDeadline = Date.now() + 5_000;
+			while (await daemonBrokerIsListening(scope.projectDir, scope.runtimeDir)) {
+				if (Date.now() > listeningStoppedDeadline) throw new Error("broker never stopped listening");
+				await Bun.sleep(20);
+			}
+
+			// A reconnecting attachment would have a broker listening again well
+			// within a few retry intervals; this one must not respawn one.
+			for (let i = 0; i < 5; i++) {
+				await Bun.sleep(100);
+				expect(await daemonBrokerIsListening(scope.projectDir, scope.runtimeDir)).toBe(false);
+			}
 		} finally {
 			await scope.teardown();
 		}

@@ -1824,12 +1824,19 @@ export async function runRootCommand(
 		await pluginPreloadPromise;
 		if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
 			await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
-			initInstanceName(parsedArgs.name);
-			void logger.time("attachCrossProcessIrc", attachCrossProcessIrc, {
-				cwd,
-				settings: settingsInstance,
-				spawnBroker: isInteractive || mode === "rpc-ui" || mode === "acp",
-			});
+			const appliedInstanceName = initInstanceName(parsedArgs.name);
+			if (parsedArgs.name !== undefined && appliedInstanceName !== parsedArgs.name) {
+				const message = `--name normalized to "${appliedInstanceName}" (letters, numbers, underscores, hyphens; 48 max).`;
+				if (isInteractive) notifs.push({ kind: "warn", message });
+				else process.stderr.write(`${chalk.yellow(`${message}\n`)}`);
+			}
+			void logger
+				.time("attachCrossProcessIrc", attachCrossProcessIrc, {
+					cwd,
+					settings: settingsInstance,
+					spawnBroker: isInteractive || mode === "rpc-ui" || mode === "acp",
+				})
+				.catch(error => logger.warn("Cross-process hub messaging attach failed", { error }));
 		}
 
 		scheduleMarketplaceAutoUpdate({

@@ -20,7 +20,6 @@ class CleanExitWorker extends EventTarget {
 function fakeAttachIrc(handlers: IrcAttachHandlers): IrcAttachment {
 	return {
 		sync: async () => ({ instance: handlers.requestedName(), peers: [] }),
-		list: async () => [],
 		send: async () => ({ outcome: "failed" as const, error: "no transport in test fixture" }),
 		detach: async () => {},
 	};

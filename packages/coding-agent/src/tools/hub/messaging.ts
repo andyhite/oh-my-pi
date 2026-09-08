@@ -175,7 +175,13 @@ export async function executeList(
 
 	const bus = IrcBus.global();
 	const localInstance = bus.remoteInstance();
-	await bus.refreshRemote();
+	// Sync re-pushes our roster and the broker answers with an authoritative
+	// `irc-roster` for this socket — that push is the freshness mechanism, and
+	// it also forces a reconnect if the socket died. A dedicated pull would
+	// race a slower `.then` against a newer `irc-roster` push from the same
+	// data chunk (see client.ts `#publishIrcAttachment`), so there is no
+	// separate refresh op to call here.
+	await bus.syncRemoteIdentity();
 	// Overlay rows are cross-process peers; a parked-status query is local-only
 	// (remote peers are never advertised as parked).
 	const remotePeers =
@@ -206,7 +212,7 @@ export async function executeList(
 		...countAddressable([...refs.filter(ref => isAddressablePeer(ref, senderId)), ...remotePeers]),
 		shown: shown.length,
 		truncated,
-		remote: shownRemotePeers.length,
+		remote: remotePeers.length,
 	};
 
 	const peers = [
@@ -355,6 +361,9 @@ export async function executeSend(
 		// Broadcasts fan out to live peers only (running | idle); reviving every
 		// parked agent on a broadcast would be a stampede. Direct sends go
 		// through the bus unfiltered so parked recipients are revived.
+		// `listRemotePeers()` rows need no status filter here: `RemoteAgentPeer.status`
+		// is typed `"running" | "idle"` and the broker only ever advertises those,
+		// so every remote row is already broadcast-eligible.
 		const targets = isBroadcast
 			? [...registry.listVisibleTo(senderId).map(ref => ref.id), ...registry.listRemotePeers().map(peer => peer.id)]
 			: [canonicalTo];

@@ -51,16 +51,15 @@ export interface IrcDeliveryReceipt {
 
 /** Cross-process leg of the bus; installed by the launch-layer bridge. */
 export interface IrcRemoteTransport {
-	/** This process's broker-granted instance name, qualifying its ids on the wire. */
-	readonly instance: string;
+	/** This process's broker-granted instance name, qualifying its ids on the wire. Undefined until a grant lands. */
+	readonly instance: string | undefined;
 	/** Deliver to a peer in another instance; resolves with that peer's receipt. */
 	send(
 		message: IrcMessage,
 		target: { instance: string; id: string },
 		opts?: { expectsReply?: boolean; ackTimeoutMs?: number },
 	): Promise<IrcDeliveryReceipt>;
-	/** Pull a fresh scope roster into the registry overlay. Never throws. */
-	refresh(): Promise<void>;
+
 	/** Push the local roster + requested instance name; resolves after the grant lands. */
 	syncIdentity(): Promise<void>;
 }
@@ -135,15 +134,6 @@ export class IrcBus {
 	/** This process's broker-granted instance name, or undefined with no transport attached. */
 	remoteInstance(): string | undefined {
 		return this.#remote?.instance;
-	}
-
-	/** Pull a fresh scope roster into the registry overlay. Never rejects. */
-	async refreshRemote(): Promise<void> {
-		try {
-			await this.#remote?.refresh();
-		} catch (error) {
-			logger.debug("IrcBus: refreshRemote failed", { error: String(error) });
-		}
 	}
 
 	/** Push the local roster + requested instance name. Never rejects. */

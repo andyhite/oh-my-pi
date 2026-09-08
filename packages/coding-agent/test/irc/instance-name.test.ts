@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
 	adoptGrantedInstanceName,
 	initInstanceName,
+	instanceDisplayName,
 	instanceIdentity,
 	onInstanceNameChanged,
 	resetInstanceIdentityForTests,
@@ -21,7 +22,7 @@ describe("instance identity", () => {
 	it("sanitizes a requested --name at init", () => {
 		const name = initInstanceName("My Peer!");
 		expect(name).toBe("MyPeer");
-		expect(instanceIdentity().name).toBe("MyPeer");
+		expect(instanceDisplayName()).toBe("MyPeer");
 	});
 
 	it("generates a valid default name when none is requested", () => {
@@ -37,7 +38,6 @@ describe("instance identity", () => {
 		setInstanceName("Beta");
 
 		expect(instanceIdentity().token).toBe(tokenAfterInit);
-		expect(instanceIdentity().name).toBe("Beta");
 	});
 
 	it("notifies listeners exactly once per real name change", () => {
@@ -68,7 +68,7 @@ describe("instance identity", () => {
 		adoptGrantedInstanceName("Alpha", "Alpha-2");
 
 		expect(seen).toEqual([]);
-		expect(instanceIdentity().name).toBe("Alpha-2");
+		expect(instanceDisplayName()).toBe("Alpha-2");
 	});
 
 	it("ignores a grant for a name that was replaced while the request was in flight", () => {
@@ -77,16 +77,30 @@ describe("instance identity", () => {
 
 		adoptGrantedInstanceName("Alpha", "Alpha-2");
 
-		expect(instanceIdentity().name).toBe("Beta");
+		expect(instanceDisplayName()).toBe("Beta");
 	});
 
-	it("keeps requesting the original name after a suffixed grant, so the original is reclaimable", () => {
+	it("pins a suffixed grant: both requested and granted move to the broker's answer", () => {
 		initInstanceName("Alpha");
 
 		adoptGrantedInstanceName("Alpha", "Alpha-2");
 
-		expect(instanceIdentity().name).toBe("Alpha-2");
-		expect(instanceIdentity().requested).toBe("Alpha");
+		expect(instanceIdentity().granted).toBe("Alpha-2");
+		expect(instanceIdentity().requested).toBe("Alpha-2");
+	});
+
+	it("leaves the granted name unchanged across a rename until the broker confirms it", () => {
+		initInstanceName("Alpha");
+		adoptGrantedInstanceName("Alpha", "Alpha");
+
+		setInstanceName("Beta");
+
+		expect(instanceIdentity().granted).toBe("Alpha");
+		expect(instanceIdentity().requested).toBe("Beta");
+
+		adoptGrantedInstanceName("Beta", "Beta");
+
+		expect(instanceIdentity().granted).toBe("Beta");
 	});
 
 	it("sanitizes a name with no surviving characters to undefined", () => {
@@ -99,7 +113,7 @@ describe("instance identity", () => {
 		const name = initInstanceName("Gamma");
 
 		expect(name).toBe("Gamma");
-		expect(instanceIdentity().name).toBe("Gamma");
+		expect(instanceDisplayName()).toBe("Gamma");
 		expect(instanceIdentity().token).toBe(lazy.token);
 	});
 

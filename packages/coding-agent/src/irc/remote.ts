@@ -20,6 +20,18 @@ export interface CrossProcessIrcHandle {
 	close(): Promise<void>;
 }
 
+let attachState: { attached: boolean; error?: string } = { attached: false };
+
+/** Whether this process is attached to its scope's IRC registry, and why not when it is not. */
+export function crossProcessIrcStatus(): { attached: boolean; error?: string } {
+	return attachState;
+}
+
+/** Reset the recorded attach state. Test-only. */
+export function resetCrossProcessIrcStateForTests(): void {
+	attachState = { attached: false };
+}
+
 class IrcRemoteBridge implements IrcRemoteTransport {
 	readonly #registry: AgentRegistry;
 	readonly #bus: IrcBus;
@@ -33,20 +45,23 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 		this.#attachment = attach(this);
 	}
 
-	get instance(): string {
-		return instanceIdentity().name;
+	get instance(): string | undefined {
+		return instanceIdentity().granted;
 	}
 
 	/** Current local roster; also fed to the broker on every `irc.sync`. */
 	static localRosterOf(registry: AgentRegistry): IrcAgentRecord[] {
 		return registry
 			.list()
-			.filter(
-				ref =>
-					ref.kind !== "advisor" &&
-					(ref.status === "running" || ref.status === "idle") &&
-					!ref.id.includes(IRC_ID_SEPARATOR),
-			)
+			.filter(ref => {
+				if (ref.id.includes(IRC_ID_SEPARATOR)) {
+					logger.warn("Local agent id contains the cross-process separator; excluded from the advertised roster", {
+						id: ref.id,
+					});
+					return false;
+				}
+				return ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle");
+			})
 			.map(ref => ({
 				id: ref.id,
 				displayName: ref.displayName,
@@ -98,10 +113,18 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 		target: { instance: string; id: string },
 		opts?: { expectsReply?: boolean; ackTimeoutMs?: number },
 	): Promise<IrcDeliveryReceipt> {
+		const instance = this.instance;
+		if (instance === undefined) {
+			return {
+				to: qualifyIrcId(target.instance, target.id),
+				outcome: "failed",
+				error: "This omp process has no broker-granted peer name yet; retry after `hub list`.",
+			};
+		}
 		const result = await this.#attachment.send(
 			{
 				id: message.id,
-				from: qualifyIrcId(this.instance, message.from),
+				from: qualifyIrcId(instance, message.from),
 				to: qualifyIrcId(target.instance, target.id),
 				body: message.body,
 				ts: message.ts,
@@ -111,14 +134,6 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 			{ expectsReply: opts?.expectsReply === true, timeoutMs: opts?.ackTimeoutMs ?? IRC_ACK_TIMEOUT_MS },
 		);
 		return { to: qualifyIrcId(target.instance, target.id), outcome: result.outcome, error: result.error };
-	}
-
-	async refresh(): Promise<void> {
-		try {
-			this.applyRoster(await this.#attachment.list());
-		} catch (error) {
-			logger.debug("Cross-process IRC roster refresh failed", { error });
-		}
 	}
 
 	/** One `irc.sync` round-trip (the attachment adopts the grant); rejects when the broker is unreachable. */
@@ -169,8 +184,14 @@ export async function attachCrossProcessIrc(options: {
 	/** Whether attaching may spawn a broker when none is listening. Defaults to `true`. */
 	spawnBroker?: boolean;
 }): Promise<CrossProcessIrcHandle | null> {
-	if (options.settings.get("irc.crossProcess") === false) return null;
-	if (options.spawnBroker === false && !(await daemonBrokerIsListening(options.cwd))) return null;
+	if (options.settings.get("irc.crossProcess") === false) {
+		attachState = { attached: false };
+		return null;
+	}
+	if (options.spawnBroker === false && !(await daemonBrokerIsListening(options.cwd))) {
+		attachState = { attached: false };
+		return null;
+	}
 
 	const registry = options.registry ?? AgentRegistry.global();
 	const bus = options.bus ?? IrcBus.global();
@@ -186,11 +207,13 @@ export async function attachCrossProcessIrc(options: {
 				nameGranted: adoptGrantedInstanceName,
 				incoming: notification => self.incoming(notification),
 				rosterChanged: peers => self.applyRoster(peers),
+				reconnect: options.spawnBroker !== false,
 			});
 			return attachment;
 		});
 		await bridge.pushIdentity();
 		bus.attachRemote(bridge);
+		attachState = { attached: true };
 		const unsubscribeChange = registry.onChange(() => bridge.scheduleSync());
 		const unsubscribeName = onInstanceNameChanged(() => bridge.syncNow());
 
@@ -200,6 +223,7 @@ export async function attachCrossProcessIrc(options: {
 			bridge.dispose();
 			bus.detachRemote(bridge);
 			registry.setRemotePeers([]);
+			attachState = { attached: false };
 			await attachment?.detach();
 		};
 		const cancelCleanup = postmortem.register("cross-process-irc", () => close());
@@ -210,7 +234,9 @@ export async function attachCrossProcessIrc(options: {
 			},
 		};
 	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
 		logger.warn("Cross-process hub messaging unavailable", { error });
+		attachState = { attached: false, error: message };
 		// Leave no half-installed attachment behind: the daemon client is
 		// process-shared, so a lingering `#irc` retries `irc.sync` forever and
 		// can still populate the overlay with peers the bus cannot reach.

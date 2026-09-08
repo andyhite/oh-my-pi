@@ -1,6 +1,7 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { IrcBus } from "../irc/bus";
-import { instanceIdentity, sanitizeInstanceName, setInstanceName } from "../irc/instance";
+import { instanceDisplayName, instanceIdentity, sanitizeInstanceName, setInstanceName } from "../irc/instance";
+import { crossProcessIrcStatus } from "../irc/remote";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
@@ -490,16 +491,17 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const requested = command.args.trim();
-			const attached = IrcBus.global().remoteInstance() !== undefined;
+			const status = crossProcessIrcStatus();
+			const attached = status.attached;
 			const detachedNote = (tail: string): string => {
 				const state =
 					runtime.settings.get("irc.crossProcess") === false
 						? "off"
-						: "enabled but not currently attached to the project broker";
+						: `enabled but not currently attached to the project broker${status.error ? ` (${status.error})` : ""}`;
 				return `cross-process messaging is ${state}; ${tail}`;
 			};
 			if (!requested) {
-				const { name } = instanceIdentity();
+				const name = instanceDisplayName();
 				await runtime.output(
 					attached
 						? `Peer name: ${name} — peers address your agents as ${name}/<agent-id>.`
@@ -513,7 +515,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			// Resolves once the bridge re-synced and adopted the broker's grant,
 			// immediately when no transport is attached.
 			await IrcBus.global().syncRemoteIdentity();
-			const granted = instanceIdentity().name;
+			const granted = instanceDisplayName();
 			const notes: string[] = [];
 			if (sanitized !== requested) notes.push(`normalized from "${requested}"`);
 			if (!attached) {
@@ -524,7 +526,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 							: "it applies once attached",
 					),
 				);
-			} else if (granted !== sanitized) {
+			} else if (instanceIdentity().granted !== sanitized) {
 				notes.push(`"${sanitized}" was taken by another omp process in this project`);
 			}
 			await runtime.output(`Peer name set to ${granted}${notes.length ? ` (${notes.join("; ")})` : ""}.`);

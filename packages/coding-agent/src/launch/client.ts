@@ -20,6 +20,7 @@ import {
 	type IrcIncomingNotification,
 	type IrcPeerRecord,
 	type IrcWireMessage,
+	ircRosterFingerprint,
 	parseDaemonRpcResult,
 	parseDaemonWireMessage,
 } from "./protocol";
@@ -65,12 +66,17 @@ export interface IrcAttachHandlers {
 	incoming(notification: IrcIncomingNotification): Promise<{ outcome: IrcDeliveryOutcome; error?: string }>;
 	/** Never includes this instance's own rows. */
 	rosterChanged(peers: IrcPeerRecord[]): void;
+	/**
+	 * When false, a dropped connection is not re-established — the attachment
+	 * ends rather than respawning a broker this process deliberately did not
+	 * start. Defaults to true.
+	 */
+	reconnect?: boolean;
 }
 
 /** Live cross-process IRC attachment to one daemon broker scope. */
 export interface IrcAttachment {
 	sync(): Promise<{ instance: string; peers: IrcPeerRecord[] }>;
-	list(): Promise<IrcPeerRecord[]>;
 	send(
 		message: IrcWireMessage,
 		opts: { expectsReply: boolean; timeoutMs: number },
@@ -179,6 +185,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #inFlightIrcDeliveries = new Set<string>();
 	readonly #completionSubscriptionId = crypto.randomUUID();
 	#irc: IrcAttachHandlers | undefined;
+	#ircToken: string | undefined;
 	#socket: net.Socket | undefined;
 	#connectPromise: Promise<void> | undefined;
 	#buffer = "";
@@ -259,6 +266,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#completionReplays.clear();
 		this.#socket = undefined;
 		this.#irc = undefined;
+		this.#ircToken = undefined;
 		this.#rejectPending(new Error("Daemon broker client closed"));
 	}
 
@@ -289,14 +297,10 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	attachIrc(handlers: IrcAttachHandlers): IrcAttachment {
 		this.#irc = handlers;
+		this.#ircToken = handlers.token;
 		this.#publishIrcAttachment();
 		return {
 			sync: () => this.#syncIrc(),
-			list: async () => {
-				const result = await this.request({ op: "irc.list", token: handlers.token });
-				if (result.op !== "irc.list") throw new Error(`Unexpected daemon response for irc.list: ${result.op}`);
-				return result.peers;
-			},
 			send: async (message, opts) => {
 				const result = await this.request({
 					op: "irc.send",
@@ -322,7 +326,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		if (!handlers) throw new Error("IRC attachment is unavailable");
 		if (this.#ircSyncPromise) {
 			const requested = handlers.requestedName();
-			const agents = JSON.stringify(handlers.roster());
+			const agents = ircRosterFingerprint(handlers.roster());
 			const snapshot = this.#ircSyncSnapshot;
 			const unchanged = snapshot !== undefined && snapshot.name === requested && snapshot.agents === agents;
 			if (unchanged) return this.#ircSyncPromise;
@@ -341,7 +345,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 		const requested = handlers.requestedName();
 		const agents = handlers.roster();
-		this.#ircSyncSnapshot = { name: requested, agents: JSON.stringify(agents) };
+		this.#ircSyncSnapshot = { name: requested, agents: ircRosterFingerprint(agents) };
 		const promise = this.request({
 			op: "irc.sync",
 			token: handlers.token,
@@ -368,8 +372,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		void this.request({ op: "ping" }).catch(() => this.#scheduleReconnect());
 	}
 
+	#ircNeedsConnection(): boolean {
+		return this.#irc !== undefined && this.#irc.reconnect !== false;
+	}
+
 	#publishIrcAttachment(): void {
 		if (this.#closed || !this.#irc) return;
+		if (!this.#ircNeedsConnection() && (this.#socket === undefined || this.#socket.destroyed)) return;
 		// The broker always pushes a fresh `irc-roster` event to this socket as
 		// part of the sync it just processed (`DaemonBroker#ircSync` calls
 		// `#broadcastIrcRoster()` before returning the RPC result), so `#onData`
@@ -384,7 +393,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#scheduleReconnect(): void {
 		if (
 			this.#closed ||
-			(this.#completionSinks.size === 0 && this.#irc === undefined) ||
+			(this.#completionSinks.size === 0 && !this.#ircNeedsConnection()) ||
 			this.#completionReconnectTimer !== undefined ||
 			(this.#socket !== undefined && !this.#socket.destroyed)
 		) {
@@ -395,7 +404,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (
 				this.#closed ||
 				(this.#completionSinks.size === 0 &&
-					this.#irc === undefined &&
+					!this.#ircNeedsConnection() &&
 					this.#completionUnsubscribes.size === 0 &&
 					this.#preservedCompletionOwners.size === 0)
 			) {
@@ -496,13 +505,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				message = parseDaemonWireMessage(decoded);
 			} catch (error) {
 				const parseError = error instanceof Error ? error : new Error(String(error));
-				if (
-					typeof decoded === "object" &&
-					decoded !== null &&
-					"event" in decoded &&
-					decoded.event === "daemon-completed"
-				) {
-					logger.warn("Ignoring malformed daemon completion", { error: parseError.message });
+				if (typeof decoded === "object" && decoded !== null && "event" in decoded) {
+					logger.warn("Ignoring malformed daemon notification", { error: parseError.message });
 					continue;
 				}
 				this.#rejectPending(parseError);
@@ -586,7 +590,14 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	async #deliverIrcIncoming(notification: IrcIncomingNotification): Promise<void> {
 		if (this.#inFlightIrcDeliveries.has(notification.deliveryId)) return;
 		const handlers = this.#irc;
-		if (!handlers) return;
+		if (!handlers) {
+			this.#ackIrcDelivery(
+				notification.deliveryId,
+				"failed",
+				"Recipient omp process detached from the project broker.",
+			);
+			return;
+		}
 		this.#inFlightIrcDeliveries.add(notification.deliveryId);
 		try {
 			const result = await handlers.incoming(notification);
@@ -603,9 +614,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	#ackIrcDelivery(deliveryId: string, outcome: IrcDeliveryOutcome, error?: string): void {
-		const handlers = this.#irc;
-		if (!handlers) return;
-		void this.request({ op: "irc.ack", token: handlers.token, deliveryId, outcome, error }).catch(() => {});
+		const token = this.#ircToken;
+		if (token === undefined) return;
+		void this.request({ op: "irc.ack", token, deliveryId, outcome, error }).catch(() => {});
 	}
 
 	#rejectPending(error: Error): void {

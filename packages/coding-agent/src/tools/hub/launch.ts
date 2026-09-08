@@ -300,7 +300,6 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 		case "shutdown":
 		case "irc.sync":
 		case "irc.detach":
-		case "irc.list":
 		case "irc.send":
 		case "irc.ack":
 			throw new ToolError(`Internal daemon result ${result.op} is not tool-visible`);
@@ -394,7 +393,6 @@ async function toolDetails(result: DaemonRpcResult, params: LaunchParams): Promi
 		case "shutdown":
 		case "irc.sync":
 		case "irc.detach":
-		case "irc.list":
 		case "irc.send":
 		case "irc.ack":
 			throw new ToolError(`Internal daemon result ${result.op} is not tool-visible`);

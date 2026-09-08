@@ -58,6 +58,8 @@ interface Peer {
 	agents: IrcAgentRecord[];
 	granted: string;
 	roster: IrcPeerRecord[];
+	/** Incremented once per `irc-roster` push observed for this attachment. */
+	rosterPushes: number;
 	received: IrcIncomingNotification[];
 	ackOutcome: IrcDeliveryOutcome;
 	/** When true, `incoming` never resolves, so no `irc.ack` is ever sent — simulates a hung peer. */
@@ -73,6 +75,7 @@ function makePeer(client: DaemonBrokerClient, name: string, agents: IrcAgentReco
 		agents,
 		granted: name,
 		roster: [] as IrcPeerRecord[],
+		rosterPushes: 0,
 		received: [] as IrcIncomingNotification[],
 		ackOutcome: "woken" as IrcDeliveryOutcome,
 		stallAck: false,
@@ -91,6 +94,7 @@ function makePeer(client: DaemonBrokerClient, name: string, agents: IrcAgentReco
 		},
 		rosterChanged: peers => {
 			peer.roster = peers;
+			peer.rosterPushes++;
 		},
 	};
 	peer.attach = client.attachIrc(handlers);
@@ -196,15 +200,60 @@ describe("daemon broker cross-process irc protocol", () => {
 			await a.attach.sync();
 			await b.attach.sync();
 
-			const bList = await b.attach.list();
-			expect(bList).toHaveLength(2);
-			expect(bList.every(row => row.instance === "Alpha")).toBe(true);
-			expect(bList.map(row => row.id).sort()).toEqual(["Main", "Worker"]);
-			expect(bList.some(row => row.instance === "Beta")).toBe(false);
+			await waitFor(() => b.roster.length === 2 && a.roster.length === 1);
+			expect(b.roster.every(row => row.instance === "Alpha")).toBe(true);
+			expect(b.roster.map(row => row.id).sort()).toEqual(["Main", "Worker"]);
+			expect(a.roster[0]).toMatchObject({ id: "Main", instance: "Beta" });
+		} finally {
+			await scope.teardown();
+		}
+	}, 30_000);
 
-			const aList = await a.attach.list();
-			expect(aList).toHaveLength(1);
-			expect(aList[0]).toMatchObject({ id: "Main", instance: "Beta" });
+	it("evicts a socket's stale token when it re-syncs under a new token, leaving no ghost roster row (H1)", async () => {
+		const scope = await setupScope();
+		try {
+			const clientA = scope.clients[0];
+			const watcher = makePeer(await scope.newClient(), "Watcher", [agentRecord("Main")]);
+			await watcher.attach.sync();
+
+			const alpha = makePeer(clientA, "Alpha", [agentRecord("Main")]);
+			await alpha.attach.sync();
+			await waitFor(() => watcher.roster.some(row => row.instance === "Alpha"));
+
+			// A second `attachIrc` on the same underlying socket, under a different
+			// token, must retire the first — the socket carries at most one irc
+			// token at a time.
+			const beta = makePeer(clientA, "Beta", [agentRecord("Main")]);
+			await beta.attach.sync();
+			await waitFor(() => watcher.roster.some(row => row.instance === "Beta"));
+			expect(watcher.roster.some(row => row.instance === "Alpha")).toBe(false);
+
+			clientA.close();
+			await waitFor(() => watcher.roster.length === 0, 5_000);
+			expect(watcher.roster.some(row => row.instance === "Alpha" || row.instance === "Beta")).toBe(false);
+		} finally {
+			await scope.teardown();
+		}
+	}, 30_000);
+
+	it("pushes a roster refresh only to the syncing socket when the scope roster is unchanged (M4)", async () => {
+		const scope = await setupScope();
+		try {
+			const a = makePeer(scope.clients[0], "Alpha", [agentRecord("Main")]);
+			const b = makePeer(await scope.newClient(), "Beta", [agentRecord("Main")]);
+			await a.attach.sync();
+			await b.attach.sync();
+			await waitFor(() => b.roster.length === 1 && a.roster.length === 1);
+
+			const bPushesBeforeResync = b.rosterPushes;
+			await a.attach.sync();
+			expect(a.rosterPushes).toBeGreaterThan(0);
+			expect(b.rosterPushes).toBe(bPushesBeforeResync);
+
+			a.agents = [{ ...a.agents[0]!, status: "idle" }];
+			const bPushesBeforeChange = b.rosterPushes;
+			await a.attach.sync();
+			await waitFor(() => b.rosterPushes > bPushesBeforeChange);
 		} finally {
 			await scope.teardown();
 		}

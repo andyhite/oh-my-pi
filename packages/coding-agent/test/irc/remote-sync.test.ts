@@ -7,7 +7,7 @@ import {
 	resetInstanceIdentityForTests,
 	setInstanceName,
 } from "@oh-my-pi/pi-coding-agent/irc/instance";
-import { attachCrossProcessIrc } from "@oh-my-pi/pi-coding-agent/irc/remote";
+import { attachCrossProcessIrc, resetCrossProcessIrcStateForTests } from "@oh-my-pi/pi-coding-agent/irc/remote";
 import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
 import type { IrcIncomingNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -54,7 +54,6 @@ function fakeBroker() {
 					handlers.nameGranted(name, name);
 					return { instance: name, peers: [] };
 				},
-				list: async () => [],
 				send: async () => ({ outcome: "failed" as const, error: "n/a" }),
 				detach: async () => {},
 			};
@@ -77,6 +76,7 @@ function fakeBroker() {
 describe("cross-process identity sync", () => {
 	beforeEach(() => {
 		resetInstanceIdentityForTests();
+		resetCrossProcessIrcStateForTests();
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
 	});
@@ -92,7 +92,7 @@ describe("cross-process identity sync", () => {
 		broker.release();
 		const handle = await attachCrossProcessIrc({
 			cwd: "/tmp",
-			settings: Settings.isolated(),
+			settings: Settings.isolated({ "irc.crossProcess": true }),
 			registry: AgentRegistry.global(),
 			bus: IrcBus.global(),
 		});
@@ -110,7 +110,7 @@ describe("cross-process identity sync", () => {
 
 		expect(broker.requested[0]).toBe("Alpha");
 		expect(broker.requested.at(-1)).toBe("Beta");
-		expect(instanceIdentity().name).toBe("Beta");
+		expect(instanceIdentity().granted).toBe("Beta");
 		await handle?.close();
 	});
 
@@ -123,7 +123,7 @@ describe("cross-process identity sync", () => {
 		registry.register({ id: "Main", displayName: "main", kind: "main", session: makeFakeSession("woken") });
 		const handle = await attachCrossProcessIrc({
 			cwd: "/tmp",
-			settings: Settings.isolated(),
+			settings: Settings.isolated({ "irc.crossProcess": true }),
 			registry,
 			bus: IrcBus.global(),
 		});

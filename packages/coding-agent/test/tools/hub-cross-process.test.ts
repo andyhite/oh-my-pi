@@ -76,7 +76,6 @@ function makeTransport(overrides?: Partial<IrcRemoteTransport>): {
 			sendCalls.push({ message, target, opts });
 			return { to: qualifyIrcId(target.instance, target.id), outcome: "injected" } satisfies IrcDeliveryReceipt;
 		},
-		refresh: async () => {},
 		syncIdentity: async () => {},
 		...overrides,
 	};

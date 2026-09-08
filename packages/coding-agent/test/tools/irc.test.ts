@@ -1257,6 +1257,34 @@ describe("IRC", () => {
 			expect(event.type).toBe("irc_message");
 		});
 
+		it("marks cross-process origin in the rendered prompt but not a local sender", async () => {
+			const remote = createRealSession();
+			sessions.push(remote.session);
+			const remotePromptSpy = vi.spyOn(remote.session.agent, "prompt").mockResolvedValue(undefined);
+			await remote.session.deliverIrcMessage({
+				id: "msg-remote",
+				from: "Other/Main",
+				to: "0-Me",
+				body: "remote hello",
+				ts: Date.now(),
+			});
+			const remotePrompted = (remotePromptSpy.mock.calls[0]![0] as unknown as CustomMessage[])[0];
+			expect(remotePrompted.content).toContain("runs in a different omp process");
+
+			const local = createRealSession();
+			sessions.push(local.session);
+			const localPromptSpy = vi.spyOn(local.session.agent, "prompt").mockResolvedValue(undefined);
+			await local.session.deliverIrcMessage({
+				id: "msg-local",
+				from: "0-Peer",
+				to: "0-Me",
+				body: "local hello",
+				ts: Date.now(),
+			});
+			const localPrompted = (localPromptSpy.mock.calls[0]![0] as unknown as CustomMessage[])[0];
+			expect(localPrompted.content).not.toContain("runs in a different omp process");
+		});
+
 		it("queues peer IRC as an interrupt while a turn is streaming", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
