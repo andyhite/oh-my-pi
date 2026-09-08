@@ -32,7 +32,6 @@ import {
 	parseDaemonSpec,
 	parseDaemonWireMessage,
 	parseDaemonWireRequest,
-	parseIrcInstanceName,
 } from "./protocol";
 import { resolveDaemonSpawnOptions } from "./spawn-options";
 import { renderTerminalOutput } from "./terminal-output";
@@ -638,7 +637,6 @@ class DaemonBroker {
 		}
 	}
 
-	/** Find the token/entry pair whose granted name matches `name`, case-insensitively. */
 	#resolveIrcName(
 		name: string,
 	): { token: string; entry: { socket: net.Socket; name: string; agents: Map<string, IrcAgentRecord> } } | undefined {
@@ -649,7 +647,8 @@ class DaemonBroker {
 		return undefined;
 	}
 
-	/** Grant an instance name, suffixing on collision with a DIFFERENT token's current name. */
+	// Collision with a DIFFERENT token's current name gets a numeric suffix; a
+	// token re-syncing its own name keeps it.
 	#grantIrcName(token: string, requested: string): string {
 		const held = (candidate: string): boolean => {
 			const resolved = this.#resolveIrcName(candidate);
@@ -664,7 +663,6 @@ class DaemonBroker {
 		return clamp(token.slice(0, 4));
 	}
 
-	/** Scope roster rows for every attached instance except `excludeToken`. */
 	#ircScopeRows(excludeToken: string): IrcPeerRecord[] {
 		const rows: IrcPeerRecord[] = [];
 		for (const [token, entry] of this.#ircInstances) {
@@ -674,7 +672,6 @@ class DaemonBroker {
 		return rows;
 	}
 
-	/** Fail every pending `irc.send` delivery addressed to `targetToken` (peer detached or disconnected). */
 	#failIrcDeliveriesForToken(targetToken: string): void {
 		for (const [deliveryId, pending] of this.#ircDeliveries) {
 			if (pending.targetToken !== targetToken) continue;
@@ -687,7 +684,6 @@ class DaemonBroker {
 		}
 	}
 
-	/** Push each attached instance's scope roster (excluding its own rows) to its socket. */
 	#broadcastIrcRoster(): void {
 		for (const [token, entry] of this.#ircInstances) {
 			if (entry.socket.destroyed) continue;
@@ -704,10 +700,6 @@ class DaemonBroker {
 		operation: Extract<DaemonOperation, { op: "irc.sync" }>,
 		socket: net.Socket,
 	): Promise<DaemonRpcResult> {
-		for (const agent of operation.agents) {
-			if (agent.id.includes("/")) throw new Error('Agent id must not contain "/"');
-		}
-		parseIrcInstanceName(operation.name, "operation.name");
 		const existing = this.#ircInstances.get(operation.token);
 		if (existing && existing.socket !== socket) {
 			this.#ircSockets.delete(existing.socket);

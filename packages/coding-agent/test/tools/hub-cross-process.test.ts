@@ -177,7 +177,7 @@ describe("cross-process hub messaging", () => {
 
 			expect(sendCalls).toHaveLength(0);
 			expect(result.isError).toBe(true);
-			expect(textOf(result)).toContain('Unknown agent "Nobody" — check `irc list` for live peers.');
+			expect(textOf(result)).toContain('Unknown agent "Nobody" — check `hub list` for live peers.');
 		});
 	});
 

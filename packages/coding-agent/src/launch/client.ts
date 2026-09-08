@@ -56,25 +56,20 @@ export interface DaemonCompletionUnregisterOptions {
 
 /** Handlers an IRC-attaching consumer supplies to route inbound cross-process traffic. */
 export interface IrcAttachHandlers {
-	/** Immutable wire identity for this process. */
 	token: string;
-	/** Instance name to request on every sync; re-read so renames propagate. */
+	/** Re-read on every sync so renames propagate. */
 	requestedName(): string;
-	/** Current local roster; re-read on every sync and after every reconnect. */
+	/** Re-read on every sync and after every reconnect. */
 	roster(): IrcAgentRecord[];
-	/** The broker granted this name (possibly suffixed); adopt it. */
-	nameGranted(name: string): void;
-	/** Deliver an inbound message locally; the resolved receipt is acked to the broker. */
+	nameGranted(requested: string, granted: string): void;
 	incoming(notification: IrcIncomingNotification): Promise<{ outcome: IrcDeliveryOutcome; error?: string }>;
-	/** Scope roster changed; never includes this instance's own rows. */
+	/** Never includes this instance's own rows. */
 	rosterChanged(peers: IrcPeerRecord[]): void;
 }
 
 /** Live cross-process IRC attachment to one daemon broker scope. */
 export interface IrcAttachment {
-	/** Push name + full local roster; resolves with the granted name and scope roster. */
 	sync(): Promise<{ instance: string; peers: IrcPeerRecord[] }>;
-	/** Pull the broker's current scope roster. */
 	list(): Promise<IrcPeerRecord[]>;
 	send(
 		message: IrcWireMessage,
@@ -318,27 +313,27 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		};
 	}
 
-	#syncIrc(): Promise<{ instance: string; peers: IrcPeerRecord[] }> {
+	async #syncIrc(): Promise<{ instance: string; peers: IrcPeerRecord[] }> {
 		if (this.#ircSyncPromise) return this.#ircSyncPromise;
 		const handlers = this.#irc;
 		if (!handlers) throw new Error("IRC attachment is unavailable");
+		const requested = handlers.requestedName();
 		const promise = this.request({
 			op: "irc.sync",
 			token: handlers.token,
-			name: handlers.requestedName(),
+			name: requested,
 			agents: handlers.roster(),
 		}).then(result => {
 			if (result.op !== "irc.sync") throw new Error(`Unexpected daemon response for irc.sync: ${result.op}`);
-			handlers.nameGranted(result.instance);
+			handlers.nameGranted(requested, result.instance);
 			return { instance: result.instance, peers: result.peers };
 		});
 		this.#ircSyncPromise = promise;
-		void promise
-			.finally(() => {
-				if (this.#ircSyncPromise === promise) this.#ircSyncPromise = undefined;
-			})
-			.catch(() => {});
-		return promise;
+		try {
+			return await promise;
+		} finally {
+			if (this.#ircSyncPromise === promise) this.#ircSyncPromise = undefined;
+		}
 	}
 
 	#publishCompletionOwners(): void {

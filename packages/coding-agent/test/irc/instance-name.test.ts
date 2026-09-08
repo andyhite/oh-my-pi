@@ -65,24 +65,33 @@ describe("instance identity", () => {
 		const seen: string[] = [];
 		onInstanceNameChanged(name => seen.push(name));
 
-		adoptGrantedInstanceName("Alpha-2");
+		adoptGrantedInstanceName("Alpha", "Alpha-2");
 
 		expect(seen).toEqual([]);
 		expect(instanceIdentity().name).toBe("Alpha-2");
+	});
+
+	it("ignores a grant for a name that was replaced while the request was in flight", () => {
+		initInstanceName("Alpha");
+		setInstanceName("Beta");
+
+		adoptGrantedInstanceName("Alpha", "Alpha-2");
+
+		expect(instanceIdentity().name).toBe("Beta");
 	});
 
 	it("sanitizes a name with no surviving characters to undefined", () => {
 		expect(sanitizeInstanceName("///")).toBeUndefined();
 	});
 
-	it("ignores a differing --name on a second initInstanceName call", () => {
-		initInstanceName("Alpha");
-		const original = instanceIdentity();
+	it("applies a requested --name even when the identity was already created lazily, keeping the token", () => {
+		const lazy = instanceIdentity();
 
-		initInstanceName("Gamma");
+		const name = initInstanceName("Gamma");
 
-		expect(instanceIdentity().name).toBe(original.name);
-		expect(instanceIdentity().token).toBe(original.token);
+		expect(name).toBe("Gamma");
+		expect(instanceIdentity().name).toBe("Gamma");
+		expect(instanceIdentity().token).toBe(lazy.token);
 	});
 
 	it("throws when setInstanceName sanitizes to no surviving characters", () => {

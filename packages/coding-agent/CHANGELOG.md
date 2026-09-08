@@ -6,6 +6,7 @@
 
 - Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
 - Headless browser tabs now freeze when a turn settles so idle animated/WebGL pages stop burning CPU/GPU, resuming automatically on next use; tabs idle past `browser.idleCloseSec` (default 30 minutes) are closed. `persist: true` on `browser.open` opts a tab out of both ([#8246](https://github.com/can1357/oh-my-pi/issues/8246) by [@H4vC](https://github.com/H4vC)).
+- Agents in other `omp` processes on the same project now appear in `hub list` as `<peer-name>/<agent-id>` and can be messaged directly; set a process's peer name with `--name` or `/peer`, or disable with the `irc.crossProcess` setting.
 
 ### Fixed
 
@@ -250,7 +251,6 @@
 ### Removed
 
 - Removed the bundled `designer` subagent and `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
-- Agents in other `omp` processes on the same project now appear in `hub list` as `<peer-name>/<agent-id>` and can be messaged directly; set a process's peer name with `--name` or `/peer`, or disable with the `irc.crossProcess` setting.
 
 ## [18.1.3] - 2026-09-02
 

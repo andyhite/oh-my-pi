@@ -15,7 +15,7 @@ import { formatAge, formatDuration } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcAwaitTargetStopped, IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
-import { qualifyIrcId, resolvePeerTarget } from "../../irc/identity";
+import { ambiguousPeerError, resolvePeerTarget } from "../../irc/identity";
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
@@ -305,13 +305,10 @@ export async function executeSend(
 	}
 	const resolved = resolvePeerTarget(registry, to, localInstance);
 	if (resolved.kind === "ambiguous") {
-		return hubErrorResult(
-			`Ambiguous peer "${resolved.id}" — ${resolved.candidates.length} omp processes advertise it: ${resolved.candidates.join(", ")}. Address one explicitly.`,
-			{ op: "send", from: senderId, to },
-		);
+		return hubErrorResult(ambiguousPeerError(resolved), { op: "send", from: senderId, to });
 	}
 	const canonicalTo = resolved.kind === "local" || resolved.kind === "remote" ? resolved.id : to;
-	if (to === senderId || (localInstance && to === qualifyIrcId(localInstance, senderId))) {
+	if (canonicalTo === senderId) {
 		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	}
 	const isBroadcast = resolved.kind === "broadcast";
@@ -460,60 +457,34 @@ export async function executeSend(
 /**
  * Canonicalize a `wait`/`from` id against the process-global registry,
  * refreshing this caller's persisted roster first so a not-yet-restored
- * parked local peer wins over a same-id remote overlay entry. Shared by
- * `executeMessageWait` and the hub tool's fast-path drains so a cross-process
- * `from` (stored qualified) is recognized consistently everywhere.
+ * parked local peer wins over a same-id remote overlay entry.
  */
 export async function resolveWaitFrom(
 	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
-	rawFrom: string | undefined,
-): Promise<
-	{ from: string | undefined; error?: undefined } | { from?: undefined; error: AgentToolResult<CoordinationDetails> }
-> {
-	if (!rawFrom) return { from: undefined };
+	rawFrom: string,
+): Promise<{ from: string; error?: undefined } | { from?: undefined; error: AgentToolResult<CoordinationDetails> }> {
 	if (deps.sessionFileHint) {
 		await ensurePersistedRoster(deps.registry, deps.sessionFileHint);
 	}
 	const resolved = resolvePeerTarget(deps.registry, rawFrom, IrcBus.global().remoteInstance());
 	if (resolved.kind === "ambiguous") {
-		return {
-			error: hubErrorResult(
-				`Ambiguous peer "${resolved.id}" — ${resolved.candidates.length} omp processes advertise it: ${resolved.candidates.join(", ")}. Address one explicitly.`,
-				{ op: "wait", from: deps.senderId },
-			),
-		};
+		return { error: hubErrorResult(ambiguousPeerError(resolved), { op: "wait", from: deps.senderId }) };
 	}
 	return { from: resolved.kind === "local" || resolved.kind === "remote" ? resolved.id : rawFrom };
 }
 
-/** Pure message wait: no jobs in play, block on the bus with peer liveness. */
+/**
+ * Pure message wait: no jobs in play, block on the bus with peer liveness.
+ * `params.from` must already be canonical (see {@link resolveWaitFrom}).
+ */
 export async function executeMessageWait(
-	deps: { registry: AgentRegistry; senderId: string; settings: Settings; sessionFileHint?: string | null },
+	deps: { registry: AgentRegistry; senderId: string; settings: Settings },
 	params: { from?: string; timeoutMs?: number },
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	const { registry, senderId, settings, sessionFileHint } = deps;
-	const rawFrom = params.from?.trim() || undefined;
+	const { registry, senderId, settings } = deps;
+	const from = params.from?.trim() || undefined;
 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
-	// Refreshing the roster is only awaited when there is actually a roster to
-	// refresh, so the common case (no session hint, or a bare wait) reaches
-	// `IrcBus.global().wait` below without crossing a microtask boundary —
-	// that call's own waiter registration is synchronous, so the caller can
-	// rely on the waiter being parked by the time this call first yields.
-	let from = rawFrom;
-	if (rawFrom) {
-		if (sessionFileHint) {
-			await ensurePersistedRoster(registry, sessionFileHint);
-		}
-		const resolved = resolvePeerTarget(registry, rawFrom, IrcBus.global().remoteInstance());
-		if (resolved.kind === "ambiguous") {
-			return hubErrorResult(
-				`Ambiguous peer "${resolved.id}" — ${resolved.candidates.length} omp processes advertise it: ${resolved.candidates.join(", ")}. Address one explicitly.`,
-				{ op: "wait", from: senderId },
-			);
-		}
-		from = resolved.kind === "local" || resolved.kind === "remote" ? resolved.id : rawFrom;
-	}
 	try {
 		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
 			liveness: { registry, senderId },

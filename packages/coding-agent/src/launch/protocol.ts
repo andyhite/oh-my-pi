@@ -93,24 +93,24 @@ export type DaemonOperation =
 	| { op: "restart"; name: string }
 	| { op: "describe"; name: string }
 	| { op: "shutdown" }
+	// `token` is a client-chosen instance identity, trusted like every other
+	// operation on the authenticated socket: same-user processes only.
 	| { op: "irc.sync"; token: string; name: string; agents: IrcAgentRecord[] }
 	| { op: "irc.detach"; token: string }
 	| { op: "irc.list"; token: string }
 	| { op: "irc.send"; token: string; message: IrcWireMessage; expectsReply: boolean; timeoutMs: number }
 	| { op: "irc.ack"; token: string; deliveryId: string; outcome: IrcDeliveryOutcome; error?: string };
 
-/** How a message reached its recipient; mirrors IrcDeliveryReceipt.outcome. */
+/** How a message reached its recipient. */
 export type IrcDeliveryOutcome = "injected" | "woken" | "revived" | "failed";
 
-/** One agent advertised to the scope by its owning omp instance. */
+/** One agent advertised to the scope by its owning omp instance; only live agents are advertised. */
 export interface IrcAgentRecord {
-	/** Instance-local agent id (e.g. "Main", "AuthLoader"); never contains "/". */
+	/** Instance-local; never contains "/". */
 	id: string;
 	displayName: string;
 	kind: "main" | "sub";
-	/** Instance-local parent id, when the agent has one. */
 	parentId?: string;
-	/** Only live agents are advertised. */
 	status: "running" | "idle";
 	/** Whether an attached live session corroborates a `running` claim. */
 	live: boolean;
@@ -118,18 +118,15 @@ export interface IrcAgentRecord {
 	activity?: string;
 }
 
-/** A scope roster row: an IrcAgentRecord plus its owning instance's name. */
+/** A scope roster row: an IrcAgentRecord plus the broker-granted name of its owning instance. */
 export interface IrcPeerRecord extends IrcAgentRecord {
-	/** Broker-granted instance name; qualifies `id` as `<instance>/<id>`. */
 	instance: string;
 }
 
-/** One message moving between omp instances; ids are fully qualified. */
+/** One message moving between omp instances; `from`/`to` are `<instance>/<agent id>`. */
 export interface IrcWireMessage {
 	id: string;
-	/** `<instance-name>/<agent id>` */
 	from: string;
-	/** `<instance-name>/<agent id>` */
 	to: string;
 	body: string;
 	ts: number;

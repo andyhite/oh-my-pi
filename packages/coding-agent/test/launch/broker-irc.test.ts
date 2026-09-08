@@ -1,11 +1,6 @@
-// Integration test — real broker socket and two in-process daemon clients simulate two omp
-// instances sharing one project scope. Exercises the low-level irc.sync/irc.list/irc.send/irc.ack
-// wire protocol directly (via SocketDaemonClient#attachIrc), not IrcBus or AgentRegistry.
-// ts-no-test-timers exception: roster-push and socket-close notifications arrive asynchronously
-// over a real net.Socket with no promise/event this test can await directly, and the broker's own
-// ack-timeout and idle-grace are driven by real Node timers. Fake timers cannot control the OS
-// socket read loop, so `waitFor` polls the observed state with a real short sleep instead of
-// guessing a fixed delay before asserting.
+// Real broker socket + two in-process daemon clients exercising the irc.* wire protocol.
+// ts-no-test-timers exception: roster pushes and socket closes arrive over a real net.Socket that
+// fake timers cannot drive, so `waitFor` polls with a short real sleep.
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
@@ -85,8 +80,8 @@ function makePeer(client: DaemonBrokerClient, name: string, agents: IrcAgentReco
 		token: peer.token,
 		requestedName: () => peer.name,
 		roster: () => peer.agents,
-		nameGranted: name => {
-			peer.granted = name;
+		nameGranted: (_requested, granted) => {
+			peer.granted = granted;
 		},
 		incoming: async notification => {
 			peer.received.push(notification);

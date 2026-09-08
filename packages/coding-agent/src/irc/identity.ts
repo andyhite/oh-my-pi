@@ -58,3 +58,7 @@ export function resolvePeerTarget(
 	}
 	return { kind: "unknown", id: input };
 }
+
+export function ambiguousPeerError(target: Extract<PeerTarget, { kind: "ambiguous" }>): string {
+	return `Ambiguous peer "${target.id}" — ${target.candidates.length} omp processes advertise it: ${target.candidates.join(", ")}. Address one explicitly.`;
+}

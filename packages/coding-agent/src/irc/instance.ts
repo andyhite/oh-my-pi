@@ -40,22 +40,18 @@ export function sanitizeInstanceName(value: string | undefined): string | undefi
 	return sanitized || undefined;
 }
 
-/** Seed the name once at startup from `--name`, else generate one. Idempotent. */
+/**
+ * Seed the name at startup from `--name`, else generate one. A requested name
+ * still wins if something already created the identity lazily.
+ */
 export function initInstanceName(requested?: string): string {
-	if (identity !== undefined) return identity.name;
 	const sanitized = sanitizeInstanceName(requested);
+	if (identity !== undefined) return sanitized === undefined ? identity.name : setInstanceName(sanitized);
 	identity = { token: crypto.randomUUID(), name: sanitized ?? generateTaskName() };
 	return identity.name;
 }
 
-/**
- * Request a new name; notifies listeners so an attached bridge re-syncs.
- *
- * Callers (e.g. the `/peer` slash command) are expected to have already
- * validated the input with {@link sanitizeInstanceName} and only pass a
- * value that sanitizes to a non-empty string. As a defensive guard, an
- * input that sanitizes away entirely throws rather than silently no-op'ing.
- */
+/** Sanitize and apply a new name; notifies listeners so an attached bridge re-syncs. Throws when nothing survives sanitizing. */
 export function setInstanceName(requested: string): string {
 	const sanitized = sanitizeInstanceName(requested);
 	if (sanitized === undefined) {
@@ -68,10 +64,15 @@ export function setInstanceName(requested: string): string {
 	return sanitized;
 }
 
-/** Record the broker-granted name WITHOUT notifying (prevents a sync loop). */
-export function adoptGrantedInstanceName(name: string): void {
+/**
+ * Record the broker's grant for `requested` without notifying (that would
+ * loop back into a sync). Ignored when the name changed while the request was
+ * in flight: the rename's own sync carries the current name.
+ */
+export function adoptGrantedInstanceName(requested: string, granted: string): void {
 	const current = instanceIdentity();
-	identity = { token: current.token, name };
+	if (current.name !== requested) return;
+	identity = { token: current.token, name: granted };
 }
 
 export function onInstanceNameChanged(listener: (name: string) => void): () => void {
@@ -81,7 +82,7 @@ export function onInstanceNameChanged(listener: (name: string) => void): () => v
 	};
 }
 
-/** Test hook: drop the singleton so each test starts from a known identity. */
+/** Reset the instance identity. Test-only. */
 export function resetInstanceIdentityForTests(): void {
 	identity = undefined;
 	listeners.clear();

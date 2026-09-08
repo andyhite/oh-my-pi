@@ -22,7 +22,7 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
-import { parseIrcId, resolvePeerTarget } from "./identity";
+import { ambiguousPeerError, parseIrcId, resolvePeerTarget } from "./identity";
 
 export interface IrcMessage {
 	id: string;
@@ -200,7 +200,7 @@ export class IrcBus {
 			receipt = {
 				to: message.to,
 				outcome: "failed",
-				error: `Ambiguous peer "${message.to}" — ${target.candidates.length} omp processes advertise it: ${target.candidates.join(", ")}. Address one explicitly.`,
+				error: ambiguousPeerError(target),
 			};
 		} else {
 			// "unknown" and "broadcast" fall through to the local path unchanged:
@@ -249,7 +249,7 @@ export class IrcBus {
 			return {
 				to: message.to,
 				outcome: "failed",
-				error: `Unknown agent "${message.to}" — check \`irc list\` for live peers.`,
+				error: `Unknown agent "${message.to}" — check \`hub list\` for live peers.`,
 			};
 		}
 		if (ref.status === "aborted") {

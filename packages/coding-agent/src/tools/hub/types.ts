@@ -39,9 +39,8 @@ export interface HubPeerInfo {
 	unread: number;
 	lastActivity: number;
 	activity?: string;
-	/** Owning instance name, for a cross-process peer. */
+	/** Both set only for a cross-process peer. */
 	instance?: string;
-	/** True when this row came from another omp process's overlay. */
 	remote?: boolean;
 }
 
@@ -58,7 +57,7 @@ export interface HubRosterCounts {
 	parked: number;
 	shown: number;
 	truncated: number;
-	/** Cross-process peers included in `shown`; 0 when no transport is attached. */
+	/** Cross-process peers among `shown`. */
 	remote: number;
 }
 
@@ -128,7 +127,7 @@ export interface CoordinationDetails {
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */
 	agents?: AgentActivitySnapshot[];
-	/** This process's own peer name, set only when a cross-process transport is attached. */
+	/** This process's own peer name; set only with a cross-process transport attached. */
 	instance?: string;
 }
 

@@ -22,17 +22,17 @@ export interface CrossProcessIrcHandle {
 
 class IrcRemoteBridge implements IrcRemoteTransport {
 	readonly #registry: AgentRegistry;
-	readonly #attachment: IrcAttachment;
 	readonly #bus: IrcBus;
+	readonly #attachment: IrcAttachment;
 	#syncTimer: NodeJS.Timeout | undefined;
 	#lastSyncAt = 0;
 	#inFlightSync: Promise<void> | undefined;
 	#queuedSync: Promise<void> | undefined;
 
-	constructor(registry: AgentRegistry, attachment: IrcAttachment, bus: IrcBus) {
+	constructor(registry: AgentRegistry, bus: IrcBus, attach: (bridge: IrcRemoteBridge) => IrcAttachment) {
 		this.#registry = registry;
-		this.#attachment = attachment;
 		this.#bus = bus;
+		this.#attachment = attach(this);
 	}
 
 	get instance(): string {
@@ -121,33 +121,33 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 	}
 
 	/**
-	 * Push name + roster and adopt the broker's grant. Every call results in
-	 * at least one subsequent full sync that reads current state — a caller
-	 * arriving while a sync is in flight is queued behind it rather than
-	 * joining its (already-stale) result, so a fresh rename or roster change
-	 * is never dropped. Repeated calls while one is already queued collapse
-	 * into that single queued run.
+	 * Push name + roster and adopt the broker's grant. A call arriving while a
+	 * sync is in flight runs a fresh sync after it (never joining the stale
+	 * request), so a rename or roster change is never dropped; further calls
+	 * while one is queued collapse into that queued run.
 	 */
-	async syncIdentity(): Promise<void> {
+	syncIdentity(): Promise<void> {
 		if (this.#queuedSync) return this.#queuedSync;
-		const previous = this.#inFlightSync ?? Promise.resolve();
-		const run = previous.then(async () => {
-			try {
-				const result = await this.#attachment.sync();
-				adoptGrantedInstanceName(result.instance);
-				this.applyRoster(result.peers);
-			} catch (error) {
-				logger.debug("Cross-process IRC identity sync failed", { error });
-			}
-		});
-		this.#inFlightSync = run;
-		this.#queuedSync = run;
-		try {
-			await run;
-		} finally {
-			if (this.#inFlightSync === run) this.#inFlightSync = undefined;
-			if (this.#queuedSync === run) this.#queuedSync = undefined;
+		if (this.#inFlightSync) {
+			const queued = this.#inFlightSync.then(() => {
+				this.#queuedSync = undefined;
+				return this.syncIdentity();
+			});
+			this.#queuedSync = queued;
+			return queued;
 		}
+		const run = this.pushIdentity()
+			.catch(error => logger.debug("Cross-process IRC identity sync failed", { error }))
+			.finally(() => {
+				if (this.#inFlightSync === run) this.#inFlightSync = undefined;
+			});
+		this.#inFlightSync = run;
+		return run;
+	}
+
+	/** One `irc.sync` round-trip (the attachment adopts the grant); rejects when the broker is unreachable. */
+	async pushIdentity(): Promise<void> {
+		this.applyRoster((await this.#attachment.sync()).peers);
 	}
 
 	/** Debounced trailing sync: coalesces bursts of local registry churn. */
@@ -194,28 +194,19 @@ export async function attachCrossProcessIrc(options: {
 
 	let attachment: IrcAttachment | undefined;
 	try {
-		const bridgeRef: { current?: IrcRemoteBridge } = {};
 		const client = await daemonClientForProject(options.cwd);
-		attachment = client.attachIrc({
-			token: instanceIdentity().token,
-			requestedName: () => instanceIdentity().name,
-			// Called synchronously by client.attachIrc() itself (before it returns),
-			// so it must not depend on `bridgeRef.current` — the bridge is
-			// constructed from the attachment this call is part of.
-			roster: () => IrcRemoteBridge.localRosterOf(registry),
-			nameGranted: name => adoptGrantedInstanceName(name),
-			// Only invoked from async inbound wire events, which can never fire
-			// before this function returns and `bridgeRef.current` is set.
-			incoming: notification => bridgeRef.current!.incoming(notification),
-			rosterChanged: peers => bridgeRef.current!.applyRoster(peers),
+		const bridge = new IrcRemoteBridge(registry, bus, self => {
+			attachment = client.attachIrc({
+				token: instanceIdentity().token,
+				requestedName: () => instanceIdentity().name,
+				roster: () => IrcRemoteBridge.localRosterOf(registry),
+				nameGranted: adoptGrantedInstanceName,
+				incoming: notification => self.incoming(notification),
+				rosterChanged: peers => self.applyRoster(peers),
+			});
+			return attachment;
 		});
-		const bridge = new IrcRemoteBridge(registry, attachment, bus);
-		bridgeRef.current = bridge;
-
-		const initial = await attachment.sync();
-		adoptGrantedInstanceName(initial.instance);
-		bridge.applyRoster(initial.peers);
-
+		await bridge.pushIdentity();
 		bus.attachRemote(bridge);
 		const unsubscribeChange = registry.onChange(() => bridge.scheduleSync());
 		const unsubscribeName = onInstanceNameChanged(() => bridge.syncNow());

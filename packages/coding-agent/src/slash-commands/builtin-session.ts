@@ -490,36 +490,41 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const requested = command.args.trim();
-			const crossProcessEnabled = runtime.settings.get("irc.crossProcess") !== false;
+			const attached = IrcBus.global().remoteInstance() !== undefined;
+			const detachedNote = (tail: string): string => {
+				const state =
+					runtime.settings.get("irc.crossProcess") === false
+						? "off"
+						: "enabled but not currently attached to the project broker";
+				return ` (cross-process messaging is ${state}; ${tail})`;
+			};
 			if (!requested) {
-				const identity = instanceIdentity();
-				const attached = IrcBus.global().remoteInstance() !== undefined;
+				const { name } = instanceIdentity();
 				await runtime.output(
 					attached
-						? `Peer name: ${identity.name} — peers address your agents as ${identity.name}/<agent-id>.`
-						: crossProcessEnabled
-							? `Peer name: ${identity.name} (cross-process messaging is enabled but not currently attached to the project broker; only local agent ids are addressable).`
-							: `Peer name: ${identity.name} (cross-process messaging is off; only local agent ids are addressable).`,
+						? `Peer name: ${name} — peers address your agents as ${name}/<agent-id>.`
+						: `Peer name: ${name}${detachedNote("only local agent ids are addressable")}.`,
 				);
 				return commandConsumed();
 			}
 			const sanitized = sanitizeInstanceName(requested);
 			if (!sanitized) return usage("Usage: /peer <name> (letters, numbers, underscores, hyphens)", runtime);
-			const attached = IrcBus.global().remoteInstance() !== undefined;
 			setInstanceName(sanitized);
 			// Resolves once the bridge re-synced and adopted the broker's grant,
 			// immediately when no transport is attached.
 			await IrcBus.global().syncRemoteIdentity();
 			const granted = instanceIdentity().name;
-			await runtime.output(
-				!attached
-					? crossProcessEnabled
-						? `Peer name set to ${granted} (cross-process messaging is enabled but not currently attached to the project broker; it applies once attached).`
-						: `Peer name set to ${granted} (cross-process messaging is off; it applies if it turns on).`
-					: granted === sanitized
-						? `Peer name set to ${granted}.`
-						: `Peer name set to ${granted} ("${sanitized}" was taken by another omp process in this project).`,
-			);
+			let note = "";
+			if (!attached) {
+				note = detachedNote(
+					runtime.settings.get("irc.crossProcess") === false
+						? "it applies if it turns on"
+						: "it applies once attached",
+				);
+			} else if (granted !== sanitized) {
+				note = ` ("${sanitized}" was taken by another omp process in this project)`;
+			}
+			await runtime.output(`Peer name set to ${granted}${note}.`);
 			return commandConsumed();
 		},
 	},
