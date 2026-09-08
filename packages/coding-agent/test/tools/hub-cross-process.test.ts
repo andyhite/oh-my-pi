@@ -27,12 +27,14 @@ const SELF_INSTANCE = "SelfInstance";
 interface FakeSession {
 	session: AgentSession;
 	delivered: IrcMessage[];
+	relays: CustomMessage[];
 	setOutcome: (outcome: "injected" | "woken") => void;
 }
 
 function makeFakeSession(): FakeSession {
 	let outcome: "injected" | "woken" = "injected";
 	const delivered: IrcMessage[] = [];
+	const relays: CustomMessage[] = [];
 	const listeners = new Set<(event: AgentSessionEvent) => void>();
 	const session = {
 		isStreaming: true,
@@ -45,11 +47,14 @@ function makeFakeSession(): FakeSession {
 			delivered.push(msg);
 			return outcome;
 		},
-		emitIrcRelayObservation: (_record: CustomMessage) => {},
+		emitIrcRelayObservation: (record: CustomMessage) => {
+			relays.push(record);
+		},
 	};
 	return {
 		session: session as unknown as AgentSession,
 		delivered,
+		relays,
 		setOutcome: value => {
 			outcome = value;
 		},
@@ -259,6 +264,48 @@ describe("cross-process hub messaging", () => {
 			expect(fake.delivered).toHaveLength(1);
 			expect(fake.delivered[0]?.to).toBe("Alpha");
 			expect(fake.delivered[0]?.from).toBe("Beta/Main");
+		});
+
+		it("relays an inbound cross-process message to the main session as a display-only card", async () => {
+			const { transport } = makeTransport();
+			bus.attachRemote(transport);
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+			const fake = makeFakeSession();
+			fake.setOutcome("woken");
+			registry.register({ id: "Worker", displayName: "task", kind: "sub", session: fake.session, status: "idle" });
+
+			const inbound: IrcMessage = {
+				id: "m3",
+				from: "Other/Peer",
+				to: `${SELF_INSTANCE}/Worker`,
+				body: "hi",
+				ts: Date.now(),
+			};
+			await bus.deliverIncoming(inbound);
+
+			expect(fake.delivered).toHaveLength(1);
+		});
+	});
+
+	describe("main-UI relay", () => {
+		it("relays an outbound cross-process send to the main session, honoring suppressRelay", async () => {
+			const { transport } = makeTransport();
+			bus.attachRemote(transport);
+			const mainFake = makeFakeSession();
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: mainFake.session });
+			const workerFake = makeFakeSession();
+			registry.register({ id: "Worker", displayName: "task", kind: "sub", session: workerFake.session });
+			registry.setRemotePeers([makeRemotePeer({ instance: "Other", localId: "Peer" })]);
+
+			await bus.send({ from: "Worker", to: "Other/Peer", body: "hi" });
+			expect(mainFake.relays).toHaveLength(1);
+			expect((mainFake.relays[0]?.details as { to?: string } | undefined)?.to).toBe("Other/Peer");
+
+			await bus.send(
+				{ from: "Worker", to: "Other/Peer", body: "hi again" },
+				{ broadcast: true, suppressRelay: true },
+			);
+			expect(mainFake.relays).toHaveLength(1);
 		});
 	});
 

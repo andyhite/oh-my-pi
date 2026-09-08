@@ -663,11 +663,15 @@ class DaemonBroker {
 		};
 		if (!held(requested)) return requested;
 		const clamp = (suffix: string): string => `${requested.slice(0, 47 - suffix.length)}-${suffix}`;
-		for (let suffix = 2; suffix <= 99; suffix++) {
+		for (let suffix = 2; suffix <= 999; suffix++) {
 			const candidate = clamp(String(suffix));
 			if (!held(candidate)) return candidate;
 		}
-		return clamp(token.slice(0, 4));
+		for (const width of [4, 8, 12]) {
+			const candidate = clamp(token.replaceAll("-", "").slice(0, width));
+			if (!held(candidate)) return candidate;
+		}
+		return clamp(crypto.randomUUID().replaceAll("-", "").slice(0, 12));
 	}
 
 	#ircScopeRows(excludeToken: string): IrcPeerRecord[] {

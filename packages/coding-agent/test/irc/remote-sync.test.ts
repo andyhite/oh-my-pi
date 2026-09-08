@@ -51,7 +51,7 @@ function fakeBroker() {
 					requested.push(name);
 					started.resolve();
 					await gate.promise;
-					handlers.nameGranted(name, name);
+					handlers.synced({ requested: name, granted: name, agents: handlers.roster() });
 					return { instance: name, peers: [] };
 				},
 				send: async () => ({ outcome: "failed" as const, error: "n/a" }),

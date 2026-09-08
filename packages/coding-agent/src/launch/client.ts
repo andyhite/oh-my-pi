@@ -62,15 +62,16 @@ export interface IrcAttachHandlers {
 	requestedName(): string;
 	/** Re-read on every sync and after every reconnect. */
 	roster(): IrcAgentRecord[];
-	nameGranted(requested: string, granted: string): void;
+	/** Fired after each accepted `irc.sync`; `agents` is exactly the roster the broker now holds. */
+	synced(result: { requested: string; granted: string; agents: IrcAgentRecord[] }): void;
 	incoming(notification: IrcIncomingNotification): Promise<{ outcome: IrcDeliveryOutcome; error?: string }>;
 	/** Never includes this instance's own rows. */
 	rosterChanged(peers: IrcPeerRecord[]): void;
-	/**
-	 * When false, a dropped connection is not re-established — the attachment
-	 * ends rather than respawning a broker this process deliberately did not
-	 * start. Defaults to true.
-	 */
+}
+
+/** Attachment-level connection policy. */
+export interface IrcAttachOptions {
+	/** When false a dropped connection is not re-established and no broker is ever spawned for irc traffic. Defaults to true. */
 	reconnect?: boolean;
 }
 
@@ -94,7 +95,7 @@ export interface DaemonBrokerClient {
 	readonly projectDir: string;
 	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
 	close(): void;
-	attachIrc(handlers: IrcAttachHandlers): IrcAttachment;
+	attachIrc(handlers: IrcAttachHandlers, options?: IrcAttachOptions): IrcAttachment;
 }
 
 /** A request reached the broker and the broker rejected the operation. */
@@ -138,6 +139,10 @@ function requestTimeoutMs(operation: DaemonOperation): number {
 		case "stop":
 		case "irc.send":
 			return operation.timeoutMs + 5_000;
+		case "irc.sync":
+		case "irc.detach":
+		case "irc.ack":
+			return 5_000;
 		default:
 			return 30_000;
 	}
@@ -186,6 +191,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #completionSubscriptionId = crypto.randomUUID();
 	#irc: IrcAttachHandlers | undefined;
 	#ircToken: string | undefined;
+	#ircReconnect = true;
 	#socket: net.Socket | undefined;
 	#connectPromise: Promise<void> | undefined;
 	#buffer = "";
@@ -204,9 +210,16 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	async request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult> {
+		return this.#send(operation, { signal, allowSpawn: true });
+	}
+
+	async #send(
+		operation: DaemonOperation,
+		opts: { signal?: AbortSignal; allowSpawn: boolean },
+	): Promise<DaemonRpcResult> {
 		if (this.#closed) throw new Error("Daemon broker client is closed");
-		if (signal?.aborted) throw new Error("Daemon broker request aborted");
-		await this.#connect();
+		if (opts.signal?.aborted) throw new Error("Daemon broker request aborted");
+		await this.#connect(opts.allowSpawn);
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) throw new Error("Daemon broker socket is unavailable");
 
@@ -222,14 +235,14 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			reject(new Error(`Daemon ${operation.op} request timed out`));
 		}, requestTimeoutMs(operation));
 		const pending: PendingRequest = { operation, resolve, reject, timer };
-		if (signal) {
+		if (opts.signal) {
 			const abort = (): void => {
 				if (!this.#pending.delete(id)) return;
 				clearTimeout(timer);
 				reject(new Error("Daemon broker request aborted"));
 			};
-			signal.addEventListener("abort", abort, { once: true });
-			pending.removeAbort = () => signal.removeEventListener("abort", abort);
+			opts.signal.addEventListener("abort", abort, { once: true });
+			pending.removeAbort = () => opts.signal?.removeEventListener("abort", abort);
 		}
 		this.#pending.set(id, pending);
 		socket.write(
@@ -295,20 +308,24 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		};
 	}
 
-	attachIrc(handlers: IrcAttachHandlers): IrcAttachment {
+	attachIrc(handlers: IrcAttachHandlers, options?: IrcAttachOptions): IrcAttachment {
 		this.#irc = handlers;
 		this.#ircToken = handlers.token;
+		this.#ircReconnect = options?.reconnect !== false;
 		this.#publishIrcAttachment();
 		return {
 			sync: () => this.#syncIrc(),
 			send: async (message, opts) => {
-				const result = await this.request({
-					op: "irc.send",
-					token: handlers.token,
-					message,
-					expectsReply: opts.expectsReply,
-					timeoutMs: opts.timeoutMs,
-				});
+				const result = await this.#send(
+					{
+						op: "irc.send",
+						token: handlers.token,
+						message,
+						expectsReply: opts.expectsReply,
+						timeoutMs: opts.timeoutMs,
+					},
+					{ allowSpawn: this.#ircReconnect },
+				);
 				if (result.op !== "irc.send") throw new Error(`Unexpected daemon response for irc.send: ${result.op}`);
 				return { outcome: result.outcome, error: result.error };
 			},
@@ -316,7 +333,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				if (this.#irc === handlers) this.#irc = undefined;
 				const socket = this.#socket;
 				if (!socket || socket.destroyed) return;
-				await this.request({ op: "irc.detach", token: handlers.token }).catch(() => {});
+				await this.#send({ op: "irc.detach", token: handlers.token }, { allowSpawn: this.#ircReconnect }).catch(
+					() => {},
+				);
 			},
 		};
 	}
@@ -346,14 +365,17 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const requested = handlers.requestedName();
 		const agents = handlers.roster();
 		this.#ircSyncSnapshot = { name: requested, agents: ircRosterFingerprint(agents) };
-		const promise = this.request({
-			op: "irc.sync",
-			token: handlers.token,
-			name: requested,
-			agents,
-		}).then(result => {
+		const promise = this.#send(
+			{
+				op: "irc.sync",
+				token: handlers.token,
+				name: requested,
+				agents,
+			},
+			{ allowSpawn: this.#ircReconnect },
+		).then(result => {
 			if (result.op !== "irc.sync") throw new Error(`Unexpected daemon response for irc.sync: ${result.op}`);
-			handlers.nameGranted(requested, result.instance);
+			handlers.synced({ requested, granted: result.instance, agents });
 			return { instance: result.instance, peers: result.peers };
 		});
 		this.#ircSyncPromise = promise;
@@ -373,7 +395,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	#ircNeedsConnection(): boolean {
-		return this.#irc !== undefined && this.#irc.reconnect !== false;
+		return this.#irc !== undefined && this.#ircReconnect;
 	}
 
 	#publishIrcAttachment(): void {
@@ -416,10 +438,10 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#completionReconnectTimer.unref();
 	}
 
-	async #connect(): Promise<void> {
+	async #connect(allowSpawn: boolean): Promise<void> {
 		if (this.#socket && !this.#socket.destroyed) return;
 		if (this.#connectPromise) return this.#connectPromise;
-		this.#connectPromise = this.#connectOnce();
+		this.#connectPromise = this.#connectOnce(allowSpawn);
 		try {
 			await this.#connectPromise;
 		} finally {
@@ -427,7 +449,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 	}
 
-	async #connectOnce(): Promise<void> {
+	async #connectOnce(allowSpawn: boolean): Promise<void> {
 		try {
 			this.#bindSocket(await openSocket(this.#endpoint, 250));
 			return;
@@ -435,6 +457,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// No live broker. Multiple clients may race to spawn; the broker's PID
 			// lease selects one winner before any candidate touches the socket.
 		}
+		if (!allowSpawn) throw new Error("Daemon broker is not listening for this project");
 		this.#spawnBroker();
 		const deadline = Date.now() + CONNECT_TIMEOUT_MS;
 		let lastError: Error | undefined;

@@ -266,6 +266,11 @@ function numberValue(value: unknown, label: string): number {
 	return value;
 }
 
+/** Wire timeouts are clamped, never rejected: a peer on a newer build must not fail the op. */
+function clampedTimeoutMs(value: unknown, label: string, max: number): number {
+	return Math.min(max, Math.max(1, Math.round(numberValue(value, label))));
+}
+
 function optionalNumber(value: unknown, label: string): number | undefined {
 	if (value === undefined) return undefined;
 	return numberValue(value, label);
@@ -559,7 +564,7 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				token: stringValue(source.token, "operation.token"),
 				message: parseIrcWireMessage(source.message),
 				expectsReply: booleanValue(source.expectsReply, "operation.expectsReply"),
-				timeoutMs: numberValue(source.timeoutMs, "operation.timeoutMs"),
+				timeoutMs: clampedTimeoutMs(source.timeoutMs, "operation.timeoutMs", 60_000),
 			};
 		case "irc.ack":
 			return {

@@ -4735,7 +4735,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Execution",
 			label: "Cross-Process Peers",
 			description:
-				"Off by default. Enable to let `hub` messaging reach agents in other omp processes attached to the same canonical project/working-directory broker scope, addressed as `<peer-name>/<agent-id>`; enabling makes this process attach to (and, when interactive, start) that broker at launch. Set the local name with `--name` or `/peer`. Takes effect on next launch; toggling here does not attach or detach a running process's broker connection.",
+				"Off by default. Enable to let `hub` messaging reach agents in other omp processes attached to the same canonical project/working-directory broker scope, addressed as `<peer-name>/<agent-id>`; enabling makes this process attach to (and, when interactive, start) that broker at launch. Set the local name with `--name` or `/peer`. Takes effect on next launch; toggling here does not attach or detach a running process's broker connection. A headless (`-p`/RPC) run attaches only to an already-listening broker and never starts one, but while attached it is addressable: other processes on this project can message its agents.",
 		},
 	},
 

@@ -104,3 +104,41 @@ export function resetInstanceIdentityForTests(): void {
 	identity = undefined;
 	listeners.clear();
 }
+
+/** The name/token state one cross-process attachment addresses itself with. */
+export interface InstanceIdentityStore {
+	token(): string;
+	requested(): string;
+	granted(): string | undefined;
+	adoptGranted(requested: string, granted: string): void;
+	/** Fires when the local name changes; a secondary identity never renames. */
+	onChanged(listener: (name: string) => void): () => void;
+}
+
+/** Process-wide identity backing `--name`, `/peer`, and the default attachment. */
+export const processInstanceIdentity: InstanceIdentityStore = {
+	token: () => instanceIdentity().token,
+	requested: () => instanceIdentity().requested,
+	granted: () => instanceIdentity().granted,
+	adoptGranted: adoptGrantedInstanceName,
+	onChanged: onInstanceNameChanged,
+};
+
+/** Independent identity for a second in-process attachment (tests, embedding). */
+export function createInstanceIdentity(requested: string): InstanceIdentityStore {
+	let state: MutableIdentity = {
+		token: crypto.randomUUID(),
+		requested: sanitizeInstanceName(requested) ?? generateTaskName(),
+		granted: undefined,
+	};
+	return {
+		token: () => state.token,
+		requested: () => state.requested,
+		granted: () => state.granted,
+		adoptGranted: (req, granted) => {
+			if (state.requested !== req) return;
+			state = { token: state.token, requested: granted, granted };
+		},
+		onChanged: () => () => {},
+	};
+}

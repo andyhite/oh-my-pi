@@ -1,11 +1,16 @@
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { daemonBrokerIsListening, daemonClientForProject, type IrcAttachment } from "../launch/client";
+import {
+	daemonBrokerIsListening,
+	daemonClientForProject,
+	type DaemonBrokerClient,
+	type IrcAttachment,
+} from "../launch/client";
 import type { IrcAgentRecord, IrcDeliveryOutcome, IrcIncomingNotification, IrcPeerRecord } from "../launch/protocol";
 import { AgentRegistry, type RemoteAgentPeer } from "../registry/agent-registry";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage, type IrcRemoteTransport } from "./bus";
 import { IRC_ID_SEPARATOR, qualifyIrcId } from "./identity";
-import { adoptGrantedInstanceName, instanceIdentity, onInstanceNameChanged } from "./instance";
+import { type InstanceIdentityStore, processInstanceIdentity } from "./instance";
 
 /** How long to wait for a cross-process peer to acknowledge a message. */
 const IRC_ACK_TIMEOUT_MS = 10_000;
@@ -35,18 +40,27 @@ export function resetCrossProcessIrcStateForTests(): void {
 class IrcRemoteBridge implements IrcRemoteTransport {
 	readonly #registry: AgentRegistry;
 	readonly #bus: IrcBus;
+	readonly #identity: InstanceIdentityStore;
 	readonly #attachment: IrcAttachment;
 	#syncTimer: NodeJS.Timeout | undefined;
 	#lastSyncAt = 0;
+	/** Ids the broker has accepted for this connection; a sender missing from it would be rejected. */
+	#advertised: ReadonlySet<string> = new Set();
 
-	constructor(registry: AgentRegistry, bus: IrcBus, attach: (bridge: IrcRemoteBridge) => IrcAttachment) {
+	constructor(
+		registry: AgentRegistry,
+		bus: IrcBus,
+		identity: InstanceIdentityStore,
+		attach: (bridge: IrcRemoteBridge) => IrcAttachment,
+	) {
 		this.#registry = registry;
 		this.#bus = bus;
+		this.#identity = identity;
 		this.#attachment = attach(this);
 	}
 
 	get instance(): string | undefined {
-		return instanceIdentity().granted;
+		return this.#identity.granted();
 	}
 
 	/** Current local roster; also fed to the broker on every `irc.sync`. */
@@ -121,6 +135,11 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 				error: "This omp process has no broker-granted peer name yet; retry after `hub list`.",
 			};
 		}
+		// The broker validates `from` against the last accepted roster; a sender
+		// registered inside the sync debounce window would be rejected. One extra
+		// round-trip only when the id is genuinely not advertised yet; the client
+		// collapses concurrent syncs, so a broadcast's legs share one.
+		if (!this.#advertised.has(message.from)) await this.syncIdentity();
 		const result = await this.#attachment.send(
 			{
 				id: message.id,
@@ -143,6 +162,11 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 
 	syncIdentity(): Promise<void> {
 		return this.pushIdentity().catch(error => logger.debug("Cross-process IRC identity sync failed", { error }));
+	}
+
+	/** Record the roster the broker just accepted for this connection. */
+	noteSynced(agents: IrcAgentRecord[]): void {
+		this.#advertised = new Set(agents.map(agent => agent.id));
 	}
 
 	/** Debounced trailing sync: coalesces bursts of local registry churn. */
@@ -183,13 +207,24 @@ export async function attachCrossProcessIrc(options: {
 	bus?: IrcBus;
 	/** Whether attaching may spawn a broker when none is listening. Defaults to `true`. */
 	spawnBroker?: boolean;
+	/** Identity to attach under. Defaults to the process-wide identity (`--name`/`/peer`). */
+	identity?: InstanceIdentityStore;
+	/** Daemon client to attach through. Defaults to the process-shared client for `cwd`. */
+	client?: DaemonBrokerClient;
 }): Promise<CrossProcessIrcHandle | null> {
 	if (options.settings.get("irc.crossProcess") === false) {
 		attachState = { attached: false };
 		return null;
 	}
-	if (options.spawnBroker === false && !(await daemonBrokerIsListening(options.cwd))) {
-		attachState = { attached: false };
+	const identity = options.identity ?? processInstanceIdentity;
+	// A secondary attachment (tests, embedding) never clobbers what `/peer`
+	// reports for the process-wide identity.
+	const isProcessAttachment = options.identity === undefined && options.client === undefined;
+	const setState = (state: { attached: boolean; error?: string }): void => {
+		if (isProcessAttachment) attachState = state;
+	};
+	if (options.spawnBroker === false && options.client === undefined && !(await daemonBrokerIsListening(options.cwd))) {
+		setState({ attached: false });
 		return null;
 	}
 
@@ -198,24 +233,29 @@ export async function attachCrossProcessIrc(options: {
 
 	let attachment: IrcAttachment | undefined;
 	try {
-		const client = await daemonClientForProject(options.cwd);
-		const bridge = new IrcRemoteBridge(registry, bus, self => {
-			attachment = client.attachIrc({
-				token: instanceIdentity().token,
-				requestedName: () => instanceIdentity().requested,
-				roster: () => IrcRemoteBridge.localRosterOf(registry),
-				nameGranted: adoptGrantedInstanceName,
-				incoming: notification => self.incoming(notification),
-				rosterChanged: peers => self.applyRoster(peers),
-				reconnect: options.spawnBroker !== false,
-			});
+		const client = options.client ?? (await daemonClientForProject(options.cwd));
+		const bridge = new IrcRemoteBridge(registry, bus, identity, self => {
+			attachment = client.attachIrc(
+				{
+					token: identity.token(),
+					requestedName: () => identity.requested(),
+					roster: () => IrcRemoteBridge.localRosterOf(registry),
+					synced: ({ requested, granted, agents }) => {
+						identity.adoptGranted(requested, granted);
+						self.noteSynced(agents);
+					},
+					incoming: notification => self.incoming(notification),
+					rosterChanged: peers => self.applyRoster(peers),
+				},
+				{ reconnect: options.spawnBroker !== false },
+			);
 			return attachment;
 		});
 		await bridge.pushIdentity();
 		bus.attachRemote(bridge);
-		attachState = { attached: true };
+		setState({ attached: true });
 		const unsubscribeChange = registry.onChange(() => bridge.scheduleSync());
-		const unsubscribeName = onInstanceNameChanged(() => bridge.syncNow());
+		const unsubscribeName = identity.onChanged(() => bridge.syncNow());
 
 		const close = async (): Promise<void> => {
 			unsubscribeChange();
@@ -223,7 +263,7 @@ export async function attachCrossProcessIrc(options: {
 			bridge.dispose();
 			bus.detachRemote(bridge);
 			registry.setRemotePeers([]);
-			attachState = { attached: false };
+			setState({ attached: false });
 			await attachment?.detach();
 		};
 		const cancelCleanup = postmortem.register("cross-process-irc", () => close());
@@ -236,7 +276,7 @@ export async function attachCrossProcessIrc(options: {
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		logger.warn("Cross-process hub messaging unavailable", { error });
-		attachState = { attached: false, error: message };
+		setState({ attached: false, error: message });
 		// Leave no half-installed attachment behind: the daemon client is
 		// process-shared, so a lingering `#irc` retries `irc.sync` forever and
 		// can still populate the overlay with peers the bus cannot reach.

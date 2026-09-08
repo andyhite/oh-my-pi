@@ -164,8 +164,9 @@ export class IrcBus {
 	 * sender's own batch) can generate an ephemeral side-channel auto-reply
 	 * instead of stranding the sender until timeout.
 	 *
-	 * `opts.suppressRelay` skips the display-only main-UI relay for this leg.
-	 * Set by broadcast fan-out when the same broadcast also targets the main
+	 * `opts.suppressRelay` skips the display-only main-UI relay for this leg,
+	 * whether it is delivered locally or handed off to a remote instance. Set
+	 * by broadcast fan-out when the same broadcast also targets the main
 	 * agent directly: the main agent then already sees the body as its own
 	 * incoming card, so relaying the sibling legs would duplicate it.
 	 */
@@ -193,6 +194,9 @@ export class IrcBus {
 						},
 					);
 					receipt = { ...remoteReceipt, to: target.id };
+					if (receipt.outcome !== "failed" && !opts?.suppressRelay) {
+						this.#relayToMainUi({ ...message, to: target.id });
+					}
 				} catch (error) {
 					receipt = {
 						to: target.id,
@@ -242,7 +246,7 @@ export class IrcBus {
 		// ids never contain the separator, so this cannot mis-strip a bare id.
 		const parsed = parseIrcId(message.to);
 		const to = parsed.instance === undefined ? message.to : parsed.id;
-		return this.#deliverLocal({ ...message, to }, { ...opts, suppressRelay: true });
+		return this.#deliverLocal({ ...message, to }, opts);
 	}
 
 	async #deliverLocal(

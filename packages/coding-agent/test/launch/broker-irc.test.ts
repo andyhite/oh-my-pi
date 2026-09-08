@@ -32,13 +32,13 @@ function restoreEnv(name: string, value: string | undefined): void {
 	else process.env[name] = value;
 }
 
-function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
+function startBroker(projectDir: string, runtimeDir: string, graceMs = 5000): Promise<void> {
 	const previousProjectDir = process.env[DAEMON_PROJECT_DIR_ENV];
 	const previousRuntimeDir = process.env[DAEMON_RUNTIME_DIR_ENV];
 	const previousGrace = process.env[DAEMON_IDLE_GRACE_ENV];
 	process.env[DAEMON_PROJECT_DIR_ENV] = projectDir;
 	process.env[DAEMON_RUNTIME_DIR_ENV] = runtimeDir;
-	process.env[DAEMON_IDLE_GRACE_ENV] = "5000";
+	process.env[DAEMON_IDLE_GRACE_ENV] = String(graceMs);
 	const broker = startDaemonBrokerFromEnvironment();
 	restoreEnv(DAEMON_PROJECT_DIR_ENV, previousProjectDir);
 	restoreEnv(DAEMON_RUNTIME_DIR_ENV, previousRuntimeDir);
@@ -84,7 +84,7 @@ function makePeer(client: DaemonBrokerClient, name: string, agents: IrcAgentReco
 		token: peer.token,
 		requestedName: () => peer.name,
 		roster: () => peer.agents,
-		nameGranted: (_requested, granted) => {
+		synced: ({ granted }) => {
 			peer.granted = granted;
 		},
 		incoming: async notification => {
@@ -524,6 +524,26 @@ describe("daemon broker cross-process irc protocol", () => {
 		}
 	}, 30_000);
 
+	it("clamps a wire irc.send timeoutMs to a 1ms floor instead of failing the op", async () => {
+		const scope = await setupScope();
+		try {
+			const a = makePeer(scope.clients[0], "Alpha", [agentRecord("Main")]);
+			const b = makePeer(await scope.newClient(), "Beta", [agentRecord("Main")]);
+			await a.attach.sync();
+			await b.attach.sync();
+			b.stallAck = true;
+
+			const result = await a.attach.send(message("Alpha/Main", "Beta/Main"), {
+				expectsReply: false,
+				timeoutMs: 0,
+			});
+			expect(result.outcome).toBe("failed");
+			expect(result.error).toContain("within 1ms");
+		} finally {
+			await scope.teardown();
+		}
+	}, 30_000);
+
 	it("pushes an updated roster to the remaining peer when a socket disconnects", async () => {
 		const scope = await setupScope();
 		try {
@@ -584,6 +604,56 @@ describe("daemon broker cross-process irc protocol", () => {
 			expect(response.error).toBeTruthy();
 		} finally {
 			await scope.teardown();
+		}
+	}, 30_000);
+
+	it("reaps a half-closed socket so the broker still idles out (half-closed)", async () => {
+		const tempDir = TempDir.createSync("@omp-launch-irc-halfclose-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		try {
+			const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 200 });
+			const broker = startBroker(projectDir, runtimeDir, 200);
+			await client.request({ op: "ping" });
+			client.close();
+
+			const token = (await fs.readFile(path.join(runtimeDir, "broker.token"), "utf8")).trim();
+			const canonical = await canonicalProjectDir(projectDir);
+			const endpoint = daemonBrokerEndpoint(canonical, runtimeDir);
+			const socket = net.createConnection({ path: endpoint });
+			const connected = Promise.withResolvers<void>();
+			socket.once("connect", () => connected.resolve());
+			socket.once("error", connected.reject);
+			await connected.promise;
+			const responded = Promise.withResolvers<void>();
+			let buffer = "";
+			socket.setEncoding("utf8");
+			socket.on("data", chunk => {
+				buffer += chunk;
+				if (buffer.indexOf("\n") >= 0) responded.resolve();
+			});
+			socket.on("error", responded.reject);
+			socket.write(
+				`${JSON.stringify({ id: crypto.randomUUID(), token, completionEvents: false, operation: { op: "ping" } })}\n`,
+			);
+			await responded.promise;
+
+			// Half-close: end the write side without destroying, simulating a client whose
+			// natural teardown the broker's `close` event might otherwise never observe.
+			socket.end();
+
+			const deadline = Date.now() + 5_000;
+			while (await daemonBrokerIsListening(projectDir, runtimeDir)) {
+				if (Date.now() > deadline) throw new Error("broker never stopped listening after half-close");
+				await Bun.sleep(20);
+			}
+			expect(await daemonBrokerIsListening(projectDir, runtimeDir)).toBe(false);
+
+			socket.destroy();
+			await broker;
+		} finally {
+			await tempDir.remove();
 		}
 	}, 30_000);
 

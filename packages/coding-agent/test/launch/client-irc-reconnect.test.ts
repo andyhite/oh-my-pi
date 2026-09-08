@@ -59,7 +59,7 @@ function makePeer(client: DaemonBrokerClient, name: string, agents: IrcAgentReco
 		token: crypto.randomUUID(),
 		requestedName: () => peer.name,
 		roster: () => peer.agents,
-		nameGranted: (_requested, granted) => {
+		synced: ({ granted }) => {
 			peer.granted = granted;
 		},
 		incoming: async () => ({ outcome: "woken" }),
@@ -200,14 +200,13 @@ describe("daemon client irc reconnect handling", () => {
 				token: crypto.randomUUID(),
 				requestedName: () => "NoRespawn",
 				roster: () => [agentRecord("Main")],
-				nameGranted: () => {},
+				synced: () => {},
 				incoming: async () => ({ outcome: "woken" }),
 				rosterChanged: peers => {
 					if (peers.length === 0 && shutdownRequested) clearedAfterShutdown = true;
 				},
-				reconnect: false,
 			};
-			const attach: IrcAttachment = scope.clients[0].attachIrc(handlers);
+			const attach: IrcAttachment = scope.clients[0].attachIrc(handlers, { reconnect: false });
 			await attach.sync();
 			await waitFor(() => watcher.roster.some(row => row.instance === "NoRespawn"));
 
@@ -234,6 +233,12 @@ describe("daemon client irc reconnect handling", () => {
 				await Bun.sleep(100);
 				expect(await daemonBrokerIsListening(scope.projectDir, scope.runtimeDir)).toBe(false);
 			}
+
+			// An irc RPC issued once the broker is confirmed gone must fail
+			// outright instead of silently respawning a broker this attachment
+			// deliberately opted out of restarting.
+			await expect(attach.sync()).rejects.toThrow(/not listening/);
+			expect(await daemonBrokerIsListening(scope.projectDir, scope.runtimeDir)).toBe(false);
 		} finally {
 			await scope.teardown();
 		}
