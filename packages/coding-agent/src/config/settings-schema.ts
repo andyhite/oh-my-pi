@@ -4735,7 +4735,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Execution",
 			label: "Cross-Process Peers",
 			description:
-				"Let `hub` messaging reach agents in other omp processes open on the same project, addressed as `<peer-name>/<agent-id>`. Set the local name with `--name` or `/peer`. Disable to keep peer messaging inside this process. Takes effect on next launch; toggling here does not attach or detach a running process's broker connection.",
+				"Let `hub` messaging reach agents in other omp processes attached to the same canonical project/working-directory broker scope, addressed as `<peer-name>/<agent-id>`. Set the local name with `--name` or `/peer`. Disable to keep peer messaging inside this process. Takes effect on next launch; toggling here does not attach or detach a running process's broker connection.",
 		},
 	},
 

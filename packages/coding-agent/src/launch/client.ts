@@ -185,6 +185,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#closed = false;
 	#completionReconnectTimer: NodeJS.Timeout | undefined;
 	#ircSyncPromise: Promise<{ instance: string; peers: IrcPeerRecord[] }> | undefined;
+	#ircSyncQueued: Promise<{ instance: string; peers: IrcPeerRecord[] }> | undefined;
+	#ircSyncSnapshot: { name: string; agents: string } | undefined;
 
 	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
 		this.projectDir = projectDir;
@@ -314,15 +316,35 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	async #syncIrc(): Promise<{ instance: string; peers: IrcPeerRecord[] }> {
-		if (this.#ircSyncPromise) return this.#ircSyncPromise;
 		const handlers = this.#irc;
 		if (!handlers) throw new Error("IRC attachment is unavailable");
+		if (this.#ircSyncPromise) {
+			const requested = handlers.requestedName();
+			const agents = JSON.stringify(handlers.roster());
+			const snapshot = this.#ircSyncSnapshot;
+			const unchanged = snapshot !== undefined && snapshot.name === requested && snapshot.agents === agents;
+			if (unchanged) return this.#ircSyncPromise;
+			if (this.#ircSyncQueued) return this.#ircSyncQueued;
+			const inFlight = this.#ircSyncPromise;
+			const queued = inFlight.then(
+				() => this.#syncIrc(),
+				() => this.#syncIrc(),
+			);
+			this.#ircSyncQueued = queued;
+			try {
+				return await queued;
+			} finally {
+				if (this.#ircSyncQueued === queued) this.#ircSyncQueued = undefined;
+			}
+		}
 		const requested = handlers.requestedName();
+		const agents = handlers.roster();
+		this.#ircSyncSnapshot = { name: requested, agents: JSON.stringify(agents) };
 		const promise = this.request({
 			op: "irc.sync",
 			token: handlers.token,
 			name: requested,
-			agents: handlers.roster(),
+			agents,
 		}).then(result => {
 			if (result.op !== "irc.sync") throw new Error(`Unexpected daemon response for irc.sync: ${result.op}`);
 			handlers.nameGranted(requested, result.instance);
@@ -332,7 +354,10 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		try {
 			return await promise;
 		} finally {
-			if (this.#ircSyncPromise === promise) this.#ircSyncPromise = undefined;
+			if (this.#ircSyncPromise === promise) {
+				this.#ircSyncPromise = undefined;
+				this.#ircSyncSnapshot = undefined;
+			}
 		}
 	}
 
@@ -343,6 +368,14 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	#publishIrcAttachment(): void {
 		if (this.#closed || !this.#irc) return;
+		// The broker always pushes a fresh `irc-roster` event to this socket as
+		// part of the sync it just processed (`DaemonBroker#ircSync` calls
+		// `#broadcastIrcRoster()` before returning the RPC result), so `#onData`
+		// already applies the authoritative, order-preserving roster for this
+		// connection. Applying `result.peers` here too raced a slower-resolving
+		// but earlier-issued sync against a newer roster push from a peer that
+		// reconnected concurrently, clobbering the fresher push with this call's
+		// stale snapshot. Sync purely for its `nameGranted` side effect.
 		void this.#syncIrc().catch(() => this.#scheduleReconnect());
 	}
 
@@ -426,6 +459,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		socket.on("close", () => {
 			if (this.#socket === socket) this.#socket = undefined;
 			this.#rejectPending(new Error("Daemon broker connection closed"));
+			this.#irc?.rosterChanged([]);
 			this.#scheduleReconnect();
 		});
 		this.#publishIrcAttachment();

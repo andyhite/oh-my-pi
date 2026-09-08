@@ -330,6 +330,51 @@ describe("cross-process hub messaging", () => {
 			expect(result.isError).toBe(true);
 			expect(textOf(result)).toContain("peer unreachable: some error text");
 		});
+
+		it("converts a rejecting remote transport into a failed receipt instead of throwing", async () => {
+			const { transport } = makeTransport({
+				send: async () => {
+					throw new Error("socket reset");
+				},
+			});
+			bus.attachRemote(transport);
+			registry.setRemotePeers([makeRemotePeer({ instance: "Other", localId: "Worker" })]);
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+
+			const result = await executeSend(
+				{ registry, senderId: "Main", settings: Settings.isolated() },
+				{ to: "Worker", message: "hi" },
+			);
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("socket reset");
+		});
+
+		it("reports both outcomes of a mixed local/remote broadcast without throwing when the remote leg fails", async () => {
+			const { transport } = makeTransport({
+				send: async () => {
+					throw new Error("remote peer unreachable");
+				},
+			});
+			bus.attachRemote(transport);
+			registry.setRemotePeers([makeRemotePeer({ instance: "Other", localId: "RemoteWorker" })]);
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+			const local = makeFakeSession();
+			local.setOutcome("injected");
+			registry.register({ id: "LocalWorker", displayName: "task", kind: "sub", session: local.session });
+
+			const result = await executeSend(
+				{ registry, senderId: "Main", settings: Settings.isolated() },
+				{ to: "all", message: "broadcast to everyone" },
+			);
+
+			expect(result.isError).toBeFalsy();
+			expect(local.delivered).toHaveLength(1);
+			const text = textOf(result);
+			expect(text).toContain("LocalWorker: injected");
+			expect(text).toContain("Other/RemoteWorker: failed — Remote delivery to");
+			expect(text).toContain("remote peer unreachable");
+		});
 	});
 
 	describe("no transport attached (local-only regression)", () => {

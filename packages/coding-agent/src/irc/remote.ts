@@ -87,6 +87,7 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 				body: notification.message.body,
 				ts: notification.message.ts,
 				replyTo: notification.message.replyTo,
+				wakeRelay: notification.message.wakeRelay,
 			},
 			{ expectsReply: notification.expectsReply },
 		);
@@ -106,6 +107,7 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 				body: message.body,
 				ts: message.ts,
 				replyTo: message.replyTo,
+				wakeRelay: message.wakeRelay,
 			},
 			{ expectsReply: opts?.expectsReply === true, timeoutMs: IRC_ACK_TIMEOUT_MS },
 		);

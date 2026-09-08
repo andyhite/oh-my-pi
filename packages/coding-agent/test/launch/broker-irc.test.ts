@@ -235,6 +235,114 @@ describe("daemon broker cross-process irc protocol", () => {
 		}
 	}, 30_000);
 
+	it("canonicalizes the sender to the granted instance name, ignoring a claimed alias", async () => {
+		const scope = await setupScope();
+		try {
+			const a = makePeer(scope.clients[0], "Alpha", [agentRecord("Main")]);
+			const b = makePeer(await scope.newClient(), "Beta", [agentRecord("Main")]);
+			await a.attach.sync();
+			await b.attach.sync();
+
+			// `a` claims a different-cased instance name than its granted one; the broker must still
+			// canonicalize using its own bound record, not the client-supplied prefix.
+			const result = await a.attach.send(message("alpha/Main", "Beta/Main", "ping"), {
+				expectsReply: false,
+				timeoutMs: 5_000,
+			});
+			expect(result.outcome).toBe("woken");
+			expect(b.received).toHaveLength(1);
+			expect(b.received[0].message.from).toBe("Alpha/Main");
+		} finally {
+			await scope.teardown();
+		}
+	}, 30_000);
+
+	it("rejects an irc.send whose sender claims a foreign instance", async () => {
+		const scope = await setupScope();
+		try {
+			const a = makePeer(scope.clients[0], "Alpha", [agentRecord("Main")]);
+			const b = makePeer(await scope.newClient(), "Beta", [agentRecord("Main")]);
+			await a.attach.sync();
+			await b.attach.sync();
+
+			let caught: unknown;
+			try {
+				await a.attach.send(message("Beta/Main", "Beta/Main", "ping"), { expectsReply: false, timeoutMs: 5_000 });
+			} catch (error) {
+				caught = error;
+			}
+			expect(caught).toBeInstanceOf(DaemonBrokerRejectedError);
+			expect(b.received).toHaveLength(0);
+		} finally {
+			await scope.teardown();
+		}
+	}, 30_000);
+
+	it("rejects an irc.send whose sender agent id is not advertised by the connection's instance", async () => {
+		const scope = await setupScope();
+		try {
+			const a = makePeer(scope.clients[0], "Alpha", [agentRecord("Main")]);
+			const b = makePeer(await scope.newClient(), "Beta", [agentRecord("Main")]);
+			await a.attach.sync();
+			await b.attach.sync();
+
+			let caught: unknown;
+			try {
+				await a.attach.send(message("Alpha/Ghost", "Beta/Main", "ping"), {
+					expectsReply: false,
+					timeoutMs: 5_000,
+				});
+			} catch (error) {
+				caught = error;
+			}
+			expect(caught).toBeInstanceOf(DaemonBrokerRejectedError);
+			expect(b.received).toHaveLength(0);
+		} finally {
+			await scope.teardown();
+		}
+	}, 30_000);
+
+	it("rejects an irc.send whose sender is a bare, unqualified id", async () => {
+		const scope = await setupScope();
+		try {
+			const a = makePeer(scope.clients[0], "Alpha", [agentRecord("Main")]);
+			const b = makePeer(await scope.newClient(), "Beta", [agentRecord("Main")]);
+			await a.attach.sync();
+			await b.attach.sync();
+
+			let caught: unknown;
+			try {
+				await a.attach.send(message("Main", "Beta/Main", "ping"), { expectsReply: false, timeoutMs: 5_000 });
+			} catch (error) {
+				caught = error;
+			}
+			expect(caught).toBeInstanceOf(DaemonBrokerRejectedError);
+			expect(b.received).toHaveLength(0);
+		} finally {
+			await scope.teardown();
+		}
+	}, 30_000);
+
+	it("round-trips wakeRelay on a delivered message", async () => {
+		const scope = await setupScope();
+		try {
+			const a = makePeer(scope.clients[0], "Alpha", [agentRecord("Main")]);
+			const b = makePeer(await scope.newClient(), "Beta", [agentRecord("Main")]);
+			await a.attach.sync();
+			await b.attach.sync();
+
+			const result = await a.attach.send(
+				{ ...message("Alpha/Main", "Beta/Main", "ping"), wakeRelay: true },
+				{ expectsReply: false, timeoutMs: 5_000 },
+			);
+			expect(result.outcome).toBe("woken");
+			expect(b.received).toHaveLength(1);
+			expect(b.received[0].message.wakeRelay).toBe(true);
+		} finally {
+			await scope.teardown();
+		}
+	}, 30_000);
+
 	it("suffixes a colliding requested name and both variants remain independently addressable", async () => {
 		const scope = await setupScope();
 		try {

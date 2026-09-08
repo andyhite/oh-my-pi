@@ -362,7 +362,7 @@ export async function executeSend(
 		// directly (its own incoming card); relaying the sibling legs to the
 		// main UI would then show the same body once per other recipient.
 		const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
-		const receipts = await Promise.all(
+		const settled = await Promise.allSettled(
 			targets.map(target =>
 				bus.send(
 					{ from: senderId, to: target, body: message, replyTo: params.replyTo },
@@ -372,6 +372,19 @@ export async function executeSend(
 					{ expectsReply: params.await || undefined, suppressRelay: suppressRelay || undefined },
 				),
 			),
+		);
+		// `bus.send` already converts remote-transport failures into failed
+		// receipts; this settlement mapping is a second line of defense so an
+		// unexpected rejection on one leg can never drop the already-settled
+		// receipts for the other legs of the same broadcast.
+		const receipts = settled.map((result, index) =>
+			result.status === "fulfilled"
+				? result.value
+				: {
+						to: targets[index]!,
+						outcome: "failed" as const,
+						error: `Delivery failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+					},
 		);
 
 		const lines: string[] = [];

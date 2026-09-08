@@ -6,7 +6,7 @@ import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
-import { parseIrcId } from "../irc/identity";
+import { parseIrcId, qualifyIrcId } from "../irc/identity";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
@@ -28,6 +28,7 @@ import {
 	type IrcAgentRecord,
 	type IrcDeliveryOutcome,
 	type IrcPeerRecord,
+	type IrcWireMessage,
 	parseDaemonSnapshot,
 	parseDaemonSpec,
 	parseDaemonWireMessage,
@@ -484,6 +485,14 @@ class DaemonBroker {
 		socket.on("error", () => {
 			// Socket closure performs client accounting.
 		});
+		// The wire protocol never half-closes (every exchange is a complete
+		// newline-delimited request/response), and `net.Socket`'s automatic
+		// half-open teardown after a peer FIN is not reliably observed to
+		// complete on this platform's Unix-socket backend — `close` can then
+		// never fire, leaving this socket in `#clients` forever and blocking
+		// idle shutdown. Force the local half closed as soon as the remote
+		// ends so `close` always follows deterministically.
+		socket.on("end", () => socket.destroy());
 		socket.on("close", () => {
 			this.#sockets.delete(socket);
 			const ircToken = this.#ircSockets.get(socket);
@@ -740,6 +749,19 @@ class DaemonBroker {
 		socket: net.Socket,
 	): Promise<DaemonRpcResult> {
 		this.#ircBinding(socket, operation.token);
+		const source = this.#ircInstances.get(operation.token);
+		if (!source) throw new Error("Daemon broker irc token is not bound to this connection");
+		const claimed = parseIrcId(operation.message.from);
+		if (
+			claimed.instance === undefined ||
+			claimed.instance.toLowerCase() !== source.name.toLowerCase() ||
+			!source.agents.has(claimed.id)
+		) {
+			throw new Error(
+				`Daemon broker irc sender "${operation.message.from}" does not match a live agent advertised by this connection's instance.`,
+			);
+		}
+		const canonicalMessage: IrcWireMessage = { ...operation.message, from: qualifyIrcId(source.name, claimed.id) };
 		const { instance, id } = parseIrcId(operation.message.to);
 		const resolved = instance === undefined ? undefined : this.#resolveIrcName(instance);
 		if (!instance || !resolved || resolved.entry.socket.destroyed) {
@@ -778,7 +800,7 @@ class DaemonBroker {
 				`${JSON.stringify({
 					event: "irc-incoming",
 					deliveryId,
-					message: operation.message,
+					message: canonicalMessage,
 					expectsReply: operation.expectsReply,
 				})}\n`,
 			);

@@ -189,12 +189,20 @@ export class IrcBus {
 			if (!this.#remote) {
 				receipt = { to: target.id, outcome: "failed", error: `Agent "${target.id}" has no live session.` };
 			} else {
-				const remoteReceipt = await this.#remote.send(
-					message,
-					{ instance: target.instance, id: target.localId },
-					opts,
-				);
-				receipt = { ...remoteReceipt, to: target.id };
+				try {
+					const remoteReceipt = await this.#remote.send(
+						message,
+						{ instance: target.instance, id: target.localId },
+						opts,
+					);
+					receipt = { ...remoteReceipt, to: target.id };
+				} catch (error) {
+					receipt = {
+						to: target.id,
+						outcome: "failed",
+						error: `Remote delivery to "${target.id}" failed: ${error instanceof Error ? error.message : String(error)}`,
+					};
+				}
 			}
 		} else if (target.kind === "ambiguous") {
 			receipt = {

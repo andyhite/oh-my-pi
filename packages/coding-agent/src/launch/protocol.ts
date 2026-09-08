@@ -131,6 +131,8 @@ export interface IrcWireMessage {
 	body: string;
 	ts: number;
 	replyTo?: string;
+	/** Requests waking a parked/idle recipient rather than just enqueueing the message. */
+	wakeRelay?: boolean;
 }
 
 /** A message addressed to an agent owned by the receiving instance. */
@@ -241,6 +243,11 @@ function booleanValue(value: unknown, label: string): boolean {
 	return value;
 }
 
+function optionalBoolean(value: unknown, label: string): boolean | undefined {
+	if (value === undefined) return undefined;
+	return booleanValue(value, label);
+}
+
 function numberValue(value: unknown, label: string): number {
 	if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${label} must be a finite number`);
 	return value;
@@ -320,6 +327,7 @@ function parseIrcWireMessage(value: unknown): IrcWireMessage {
 		body: rawString(source.body, "message.body"),
 		ts: numberValue(source.ts, "message.ts"),
 		replyTo: optionalString(source.replyTo, "message.replyTo"),
+		wakeRelay: optionalBoolean(source.wakeRelay, "message.wakeRelay"),
 	};
 }
 
