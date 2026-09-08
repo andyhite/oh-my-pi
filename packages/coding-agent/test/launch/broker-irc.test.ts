@@ -11,6 +11,7 @@ import {
 	type DaemonBrokerClient,
 	DaemonBrokerRejectedError,
 	createDaemonBrokerClient,
+	daemonBrokerIsListening,
 	type IrcAttachHandlers,
 	type IrcAttachment,
 } from "../../src/launch/client";
@@ -161,27 +162,26 @@ async function rawWireRequest(
 	const endpoint = daemonBrokerEndpoint(canonical, scope.runtimeDir);
 	const socket = net.createConnection({ path: endpoint });
 	try {
-		await new Promise<void>((resolve, reject) => {
-			socket.once("connect", () => resolve());
-			socket.once("error", reject);
+		const connected = Promise.withResolvers<void>();
+		socket.once("connect", () => connected.resolve());
+		socket.once("error", connected.reject);
+		await connected.promise;
+		const responded = Promise.withResolvers<{ ok: boolean; error?: string }>();
+		let buffer = "";
+		socket.setEncoding("utf8");
+		socket.on("data", chunk => {
+			buffer += chunk;
+			const newline = buffer.indexOf("\n");
+			if (newline < 0) return;
+			try {
+				responded.resolve(JSON.parse(buffer.slice(0, newline)));
+			} catch (error) {
+				responded.reject(error instanceof Error ? error : new Error(String(error)));
+			}
 		});
-		const response = await new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
-			let buffer = "";
-			socket.setEncoding("utf8");
-			socket.on("data", chunk => {
-				buffer += chunk;
-				const newline = buffer.indexOf("\n");
-				if (newline < 0) return;
-				try {
-					resolve(JSON.parse(buffer.slice(0, newline)));
-				} catch (error) {
-					reject(error instanceof Error ? error : new Error(String(error)));
-				}
-			});
-			socket.on("error", reject);
-			socket.write(`${JSON.stringify({ id: crypto.randomUUID(), token, completionEvents: false, operation })}\n`);
-		});
-		return response;
+		socket.on("error", responded.reject);
+		socket.write(`${JSON.stringify({ id: crypto.randomUUID(), token, completionEvents: false, operation })}\n`);
+		return await responded.promise;
 	} finally {
 		socket.destroy();
 	}
@@ -235,7 +235,7 @@ describe("daemon broker cross-process irc protocol", () => {
 		}
 	}, 30_000);
 
-	it("canonicalizes the sender to the granted instance name, ignoring a claimed alias", async () => {
+	it("routes irc.send by exact instance name, failing a differently-cased target", async () => {
 		const scope = await setupScope();
 		try {
 			const a = makePeer(scope.clients[0], "Alpha", [agentRecord("Main")]);
@@ -243,15 +243,14 @@ describe("daemon broker cross-process irc protocol", () => {
 			await a.attach.sync();
 			await b.attach.sync();
 
-			// `a` claims a different-cased instance name than its granted one; the broker must still
-			// canonicalize using its own bound record, not the client-supplied prefix.
-			const result = await a.attach.send(message("alpha/Main", "Beta/Main", "ping"), {
+			// `a` is granted "Alpha"; addressing it as "alpha" must not resolve —
+			// instance-name matching is exact, not case-insensitive.
+			const result = await a.attach.send(message("Alpha/Main", "alpha/Main", "ping"), {
 				expectsReply: false,
 				timeoutMs: 5_000,
 			});
-			expect(result.outcome).toBe("woken");
-			expect(b.received).toHaveLength(1);
-			expect(b.received[0].message.from).toBe("Alpha/Main");
+			expect(result.outcome).toBe("failed");
+			expect(b.received).toHaveLength(0);
 		} finally {
 			await scope.teardown();
 		}
@@ -536,6 +535,28 @@ describe("daemon broker cross-process irc protocol", () => {
 			expect(response.error).toBeTruthy();
 		} finally {
 			await scope.teardown();
+		}
+	}, 30_000);
+
+	it("daemonBrokerIsListening reflects broker liveness without spawning one", async () => {
+		const tempDir = TempDir.createSync("@omp-launch-irc-listening-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		try {
+			expect(await daemonBrokerIsListening(projectDir, runtimeDir)).toBe(false);
+
+			const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5000 });
+			const broker = startBroker(projectDir, runtimeDir);
+			await client.request({ op: "ping" });
+
+			expect(await daemonBrokerIsListening(projectDir, runtimeDir)).toBe(true);
+
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+		} finally {
+			await tempDir.remove();
 		}
 	}, 30_000);
 });

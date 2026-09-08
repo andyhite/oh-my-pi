@@ -369,7 +369,11 @@ export async function executeSend(
 					// Awaited sends mark the sender as blocked on an answer so a
 					// busy recipient that cannot reach a step boundary (async
 					// disabled) auto-replies instead of stranding the sender.
-					{ expectsReply: params.await || undefined, suppressRelay: suppressRelay || undefined },
+					{
+						expectsReply: params.await || undefined,
+						suppressRelay: suppressRelay || undefined,
+						broadcast: isBroadcast || undefined,
+					},
 				),
 			),
 		);

@@ -315,6 +315,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#focusAgent = deps.focusAgent;
 
 		this.#unsubscribers.push(this.#registry.onChange(() => this.#scheduleDataChange()));
+		this.#unsubscribers.push(this.#registry.onRemoteChange(() => this.#scheduleDataChange()));
 		this.#unsubscribers.push(this.#observers.onChange(() => this.#scheduleDataChange()));
 		this.#ageTimer = setInterval(() => {
 			if (this.#hasFallbackLiveSessions) {
@@ -973,7 +974,22 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				? `${active("Flat")}${theme.fg("dim", "/")}${inactive("By parent")}`
 				: `${inactive("Flat")}${theme.fg("dim", "/")}${active("By parent")}`;
 		const counts = this.#statusSummary();
-		const header = `${theme.bold("Roster")}${theme.fg("dim", theme.sep.dot)}${projection}${counts ? theme.fg("dim", theme.sep.dot) + counts : ""}`;
+		const instance = this.#irc.remoteInstance();
+		const remotePeers = this.#registry.listRemotePeers();
+		const peerParts: string[] = [];
+		if (instance) peerParts.push(theme.fg("dim", `you: ${instance}`));
+		if (remotePeers.length > 0) {
+			const instances = [...new Set(remotePeers.map(peer => peer.instance))].sort();
+			const shown = instances.slice(0, 3).join(", ");
+			peerParts.push(
+				theme.fg(
+					"dim",
+					`${remotePeers.length} remote in ${instances.length} omp (${shown}${instances.length > 3 ? ", …" : ""})`,
+				),
+			);
+		}
+		const peers = peerParts.length > 0 ? peerParts.join(theme.fg("dim", theme.sep.dot)) : "";
+		const header = `${theme.bold("Roster")}${theme.fg("dim", theme.sep.dot)}${projection}${counts ? theme.fg("dim", theme.sep.dot) + counts : ""}${peers ? theme.fg("dim", theme.sep.dot) + peers : ""}`;
 		const lines = wrapTextWithAnsi(header, Math.max(1, width));
 
 		const metrics = this.#aggregate;

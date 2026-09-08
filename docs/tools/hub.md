@@ -18,7 +18,7 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
   - `packages/coding-agent/src/session/agent-session.ts` — `deliverIrcMessage(...)`: recipient-side injection and wake turns.
   - `packages/coding-agent/src/async/job-manager.ts` — job registry, cancellation, delivery suppression, smart poll ladder.
   - `packages/coding-agent/src/launch/client.ts` / `broker.ts` / `presence.ts` / `protocol.ts` — process-supervision broker.
-  - `packages/coding-agent/src/config/settings-schema.ts` — `irc.timeoutMs`, `async.pollWaitDuration`, `launch.enabled`.
+  - `packages/coding-agent/src/config/settings-schema.ts` — `irc.timeoutMs`, `irc.crossProcess`, `async.pollWaitDuration`, `launch.enabled`.
 
 ## Inputs
 
@@ -33,6 +33,8 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
 | `ids` | `string[]` | No | `wait`: job ids to watch (omit = all running jobs); `cancel`: job ids to kill (required). |
 | `timeoutMs` | `number` | No | Peer `send` with `await`, and message/job `wait`: milliseconds; `0` waits indefinitely. Defaults to `irc.timeoutMs` for a reply/pure-message wait and to the poll window when jobs are watched. |
 | `peek` | `boolean` | No | `inbox`: leave messages in the process-global bus mailbox. Note that messages already buffered on the live recipient session are still drained into this result by the current implementation. |
+| `status` | `"running" \| "idle" \| "parked"` | No | `list`: filter by status; omit for running+idle. |
+| `limit` | `number` | No | `list`: max peer rows shown, merged across local and remote peers and sorted before truncation; default `DEFAULT_HUB_LIST_LIMIT`, max `MAX_HUB_LIST_LIMIT`. |
 | `name` | `string` | process ops | Stable project-scoped launch name (1-48 chars). On `send`/`wait` it routes the op to the process broker. |
 | `application`, `args`, `env`, `cwd`, `pty`, `ready`, `restart`, `persist`, `detached` | — | `start` | Launch spec, unchanged from the former `launch` tool. |
 | `lines`, `head`, `grep`, `follow`, `cursor` | — | `logs` | Log window controls, unchanged. |
@@ -41,11 +43,20 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
 | `timeout` | `number` | No | `logs`/`stop`/`wait`-with-`name`: seconds; default 30 (stop: 5). |
 
 ## Op families and dispatch
-- **Messaging** — `send` (with `to`), `inbox`, `list`, and `wait` with `from`. Fire-and-forget sends return delivery receipts (`injected`/`woken`/`revived`/`failed`); direct sends can revive parked agents, while broadcasts target visible live peers without reviving every parked agent. `await: true` waits for one reply after delivery. A busy recipient with async execution disabled may auto-reply rather than strand an awaiting sender.
+- **Messaging** — `send` (with `to`), `inbox`, `list`, and `wait` with `from`. Fire-and-forget sends return delivery receipts (`injected`/`woken`/`revived`/`failed`); direct sends can revive parked agents, while broadcasts target visible live peers without reviving every parked agent. `await: true` waits for one reply after delivery. A busy recipient with async execution disabled may auto-reply rather than strand an awaiting sender. `to` also accepts a cross-process peer id (`<peer-name>/<agent-id>`) when another `omp` process is attached to the same project broker; see [Cross-process messaging](#cross-process-messaging).
 - **Jobs** — `wait` (bare or with `ids`), `cancel`, `jobs`. Owner-scoped visibility, watch/unwatch delivery suppression, `acknowledgeDeliveries` on returned completions, 500 ms `onUpdate` snapshots while waiting, and the `async.pollWaitDuration` fixed/smart wait window. `jobs` is the former job-list snapshot plus the roster of running subagents with no running job entry.
 - **Processes** — `start`, `ps`, `logs`, `stop`, `restart`, `describe`, plus `send`/`wait` when they carry `name`. Exact behavior of the former `launch` tool; `ps` is the broker's `list`. See the launch sections below.
 
 `send` with both `to` and `name` is rejected as ambiguous. `wait` routes by target: `name` → process wait; otherwise the unified coordination wait.
+
+## Cross-process messaging
+Agents in other `omp` processes attached to the same canonical project/working-directory broker appear in `hub list` as `<peer-name>/<agent-id>` and can be messaged directly, exactly like a local subagent id. Peer names are matched exactly (`Alpha` and `alpha` are distinct instances); a bare id that is ambiguous between the local roster and a remote peer, or between two remote peers, is rejected with an `Ambiguous peer "<id>" — N omp processes advertise it: ...` error naming every qualified candidate.
+
+- Set this process's peer name with `--name <name>` at startup or `/peer <name>` at runtime; both sanitize to `[A-Za-z0-9_-]`, 1-48 chars — `--name` rejects a non-canonical value outright, while `/peer` normalizes it and reports the normalization. A name already held by another process in the same project scope is granted a numeric suffix (`Alpha-2`); the process keeps requesting its original name on every resync, so it reclaims the unsuffixed name once the holder detaches.
+- Disable cross-process participation entirely with the `irc.crossProcess` setting (default enabled). A headless (`-p`/RPC) run also skips spawning a broker when none is already listening for the project, so a scripted loop of one-shot invocations never leaves broker processes behind; interactive, `rpc-ui`, and ACP sessions still spawn one on demand.
+- A direct cross-process send waits up to 10 s for the peer's ack; a `to: "all"` broadcast's remote legs use a shorter 2 s window per peer so one hung process cannot stall the whole broadcast.
+- `send await:true` on a remote peer that is never observed running (idle/parked the whole time) aborts with "stopped without replying" after a bounded ~10 s grace window instead of blocking for the full `irc.timeoutMs`.
+- `history://` and `agent://` resolve local transcripts only; a remote peer's transcript is not reachable from this process by those URIs.
 
 ## The unified `wait`
 One blocking primitive. It resolves job legs (explicit `ids`, owner-scoped and silently filtered, or every running job the caller owns) and — when the session can message peers — parks a bus waiter, then races:
@@ -112,6 +123,7 @@ Unchanged from the former `launch` tool: the first process op starts a detached 
 - Poll window: `async.pollWaitDuration` — `5s`/`10s`/`30s`/`1m`/`5m`/`smart` (default); smart ladder `[5s..5m]` climbing per back-to-back wait, resetting after 60 s without waiting.
 - Job retention 5 min; manager max-running fallback 15; `async.maxJobs` clamped 1..100.
 - Launch names 1-48 chars; `ready.port` 1..65535; `logs`/`wait`/`stop` timeouts capped at one hour.
+- Cross-process: `list`'s `limit` applies to the merged local+remote roster, with a `remote` tally in `details.counts.remote` and each remote row flagged `remote: true`; direct sends to a remote peer ack within 10 s, broadcast legs to remote peers within 2 s; a remote `await` peer never observed running aborts after a bounded ~10 s grace window.
 
 ## Errors
 - Most validation/availability failures are text results with `isError: true`: messaging unavailable, missing `to`/`message`, self-send (`Cannot send a message to yourself.`), `await` with `to:"all"`, `to`+`name` on one send, missing `ids` on `cancel`, and launch disabled. The async-disabled `jobs`/`cancel` response is an exception: it returns `Async execution is disabled; no background jobs are available.` with an empty job list and no `isError` flag.

@@ -496,14 +496,14 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					runtime.settings.get("irc.crossProcess") === false
 						? "off"
 						: "enabled but not currently attached to the project broker";
-				return ` (cross-process messaging is ${state}; ${tail})`;
+				return `cross-process messaging is ${state}; ${tail}`;
 			};
 			if (!requested) {
 				const { name } = instanceIdentity();
 				await runtime.output(
 					attached
 						? `Peer name: ${name} — peers address your agents as ${name}/<agent-id>.`
-						: `Peer name: ${name}${detachedNote("only local agent ids are addressable")}.`,
+						: `Peer name: ${name} (${detachedNote("only local agent ids are addressable")}).`,
 				);
 				return commandConsumed();
 			}
@@ -514,17 +514,20 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			// immediately when no transport is attached.
 			await IrcBus.global().syncRemoteIdentity();
 			const granted = instanceIdentity().name;
-			let note = "";
+			const notes: string[] = [];
+			if (sanitized !== requested) notes.push(`normalized from "${requested}"`);
 			if (!attached) {
-				note = detachedNote(
-					runtime.settings.get("irc.crossProcess") === false
-						? "it applies if it turns on"
-						: "it applies once attached",
+				notes.push(
+					detachedNote(
+						runtime.settings.get("irc.crossProcess") === false
+							? "it applies if it turns on"
+							: "it applies once attached",
+					),
 				);
 			} else if (granted !== sanitized) {
-				note = ` ("${sanitized}" was taken by another omp process in this project)`;
+				notes.push(`"${sanitized}" was taken by another omp process in this project`);
 			}
-			await runtime.output(`Peer name set to ${granted}${note}.`);
+			await runtime.output(`Peer name set to ${granted}${notes.length ? ` (${notes.join("; ")})` : ""}.`);
 			return commandConsumed();
 		},
 	},

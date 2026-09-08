@@ -80,6 +80,15 @@ describe("instance identity", () => {
 		expect(instanceIdentity().name).toBe("Beta");
 	});
 
+	it("keeps requesting the original name after a suffixed grant, so the original is reclaimable", () => {
+		initInstanceName("Alpha");
+
+		adoptGrantedInstanceName("Alpha", "Alpha-2");
+
+		expect(instanceIdentity().name).toBe("Alpha-2");
+		expect(instanceIdentity().requested).toBe("Alpha");
+	});
+
 	it("sanitizes a name with no surviving characters to undefined", () => {
 		expect(sanitizeInstanceName("///")).toBeUndefined();
 	});

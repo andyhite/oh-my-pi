@@ -5,9 +5,10 @@
  * inbound delivery via `deliverIncoming`, remote-aware `wait` liveness, and
  * transport failure passthrough — plus a no-transport regression guard.
  */
-import { beforeEach, describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
+	IrcAwaitTargetStopped,
 	IrcBus,
 	type IrcDeliveryReceipt,
 	type IrcMessage,
@@ -58,13 +59,21 @@ function makeFakeSession(): FakeSession {
 /** Hand-written transport; captures every `send` call for assertion. */
 function makeTransport(overrides?: Partial<IrcRemoteTransport>): {
 	transport: IrcRemoteTransport;
-	sendCalls: Array<{ message: IrcMessage; target: { instance: string; id: string } }>;
+	sendCalls: Array<{
+		message: IrcMessage;
+		target: { instance: string; id: string };
+		opts: { expectsReply?: boolean; ackTimeoutMs?: number } | undefined;
+	}>;
 } {
-	const sendCalls: Array<{ message: IrcMessage; target: { instance: string; id: string } }> = [];
+	const sendCalls: Array<{
+		message: IrcMessage;
+		target: { instance: string; id: string };
+		opts: { expectsReply?: boolean; ackTimeoutMs?: number } | undefined;
+	}> = [];
 	const transport: IrcRemoteTransport = {
 		instance: SELF_INSTANCE,
-		send: async (message, target) => {
-			sendCalls.push({ message, target });
+		send: async (message, target, opts) => {
+			sendCalls.push({ message, target, opts });
 			return { to: qualifyIrcId(target.instance, target.id), outcome: "injected" } satisfies IrcDeliveryReceipt;
 		},
 		refresh: async () => {},
@@ -306,6 +315,69 @@ describe("cross-process hub messaging", () => {
 			const result = await waiting;
 			expect(result.isError).toBe(true);
 			expect(textOf(result)).toContain("not running");
+		});
+
+		it("aborts after the grace window when the remote peer is never observed running", async () => {
+			vi.useFakeTimers();
+			try {
+				const { transport } = makeTransport();
+				bus.attachRemote(transport);
+				registry.register({ id: "Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+				registry.setRemotePeers([
+					makeRemotePeer({ instance: "Other", localId: "Worker", status: "idle", live: false }),
+				]);
+
+				const waiting = bus.wait("Main", { from: "Other/Worker" }, 120_000, undefined, {
+					drainPending: false,
+					awaitTarget: { registry, target: "Other/Worker" },
+				});
+				let settled = false;
+				let error: unknown;
+				waiting.then(
+					() => {
+						settled = true;
+					},
+					err => {
+						settled = true;
+						error = err;
+					},
+				);
+
+				vi.advanceTimersByTime(5_000);
+				await Promise.resolve();
+				await Promise.resolve();
+				expect(settled).toBe(false);
+
+				vi.advanceTimersByTime(5_100);
+				await Promise.resolve();
+				await Promise.resolve();
+				expect(settled).toBe(true);
+				expect(error).toBeInstanceOf(IrcAwaitTargetStopped);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
+	describe("broadcast ack window", () => {
+		it("uses the short broadcast ack window for a remote leg, and the direct-send default otherwise", async () => {
+			const { transport, sendCalls } = makeTransport();
+			bus.attachRemote(transport);
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+			registry.setRemotePeers([makeRemotePeer({ instance: "Other", localId: "Worker" })]);
+
+			await executeSend(
+				{ registry, senderId: "Main", settings: Settings.isolated() },
+				{ to: "Other/Worker", message: "direct" },
+			);
+			await executeSend(
+				{ registry, senderId: "Main", settings: Settings.isolated() },
+				{ to: "all", message: "broadcast" },
+			);
+
+			expect(sendCalls).toHaveLength(2);
+			expect(sendCalls[0]?.opts?.ackTimeoutMs).toBeUndefined();
+			expect(sendCalls[1]?.opts?.ackTimeoutMs).toBe(2_000);
 		});
 	});
 

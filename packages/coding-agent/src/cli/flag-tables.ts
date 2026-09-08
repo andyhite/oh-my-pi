@@ -180,8 +180,8 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.sessionDir = value;
 	},
 	"--name": (result, value) => {
-		if (sanitizeInstanceName(value) === undefined) {
-			throw new CliUsageError("--name must contain at least one letter, number, underscore, or hyphen");
+		if (sanitizeInstanceName(value) !== value) {
+			throw new CliUsageError("--name must be 1-48 letters, numbers, underscores, or hyphens");
 		}
 		result.name = value;
 	},

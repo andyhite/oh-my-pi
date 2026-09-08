@@ -1828,6 +1828,7 @@ export async function runRootCommand(
 			void logger.time("attachCrossProcessIrc", attachCrossProcessIrc, {
 				cwd,
 				settings: settingsInstance,
+				spawnBroker: isInteractive || mode === "rpc-ui" || mode === "acp",
 			});
 		}
 

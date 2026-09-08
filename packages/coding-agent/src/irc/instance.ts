@@ -1,16 +1,18 @@
 import { generateTaskName } from "../task/name-generator";
 
-/** Stable per-process identity for cross-process hub messaging. */
 export interface InstanceIdentity {
 	/** Immutable wire identity; survives renames. */
 	readonly token: string;
-	/** Human-readable name peers address as `<name>/<agent-id>`. */
+	/** Human-readable granted name peers address as `<name>/<agent-id>`. */
 	readonly name: string;
+	/** Name currently requested from the broker; may differ from the granted `name` after a suffix collision. */
+	readonly requested: string;
 }
 
 interface MutableIdentity {
 	token: string;
-	name: string;
+	requested: string;
+	granted: string;
 }
 
 let identity: MutableIdentity | undefined;
@@ -29,9 +31,10 @@ function notify(name: string): void {
 /** Lazily created; `token` is a `crypto.randomUUID()`, `name` a generated pair. */
 export function instanceIdentity(): InstanceIdentity {
 	if (identity === undefined) {
-		identity = { token: crypto.randomUUID(), name: generateTaskName() };
+		const name = generateTaskName();
+		identity = { token: crypto.randomUUID(), requested: name, granted: name };
 	}
-	return identity;
+	return { token: identity.token, name: identity.granted, requested: identity.requested };
 }
 
 /** Strip to `[A-Za-z0-9_-]`, cap at 48 chars; undefined when nothing survives. */
@@ -46,9 +49,10 @@ export function sanitizeInstanceName(value: string | undefined): string | undefi
  */
 export function initInstanceName(requested?: string): string {
 	const sanitized = sanitizeInstanceName(requested);
-	if (identity !== undefined) return sanitized === undefined ? identity.name : setInstanceName(sanitized);
-	identity = { token: crypto.randomUUID(), name: sanitized ?? generateTaskName() };
-	return identity.name;
+	if (identity !== undefined) return sanitized === undefined ? identity.granted : setInstanceName(sanitized);
+	const name = sanitized ?? generateTaskName();
+	identity = { token: crypto.randomUUID(), requested: name, granted: name };
+	return identity.granted;
 }
 
 /** Sanitize and apply a new name; notifies listeners so an attached bridge re-syncs. Throws when nothing survives sanitizing. */
@@ -59,7 +63,7 @@ export function setInstanceName(requested: string): string {
 	}
 	const current = instanceIdentity();
 	if (sanitized === current.name) return current.name;
-	identity = { token: current.token, name: sanitized };
+	identity = { token: current.token, requested: sanitized, granted: sanitized };
 	notify(sanitized);
 	return sanitized;
 }
@@ -71,8 +75,8 @@ export function setInstanceName(requested: string): string {
  */
 export function adoptGrantedInstanceName(requested: string, granted: string): void {
 	const current = instanceIdentity();
-	if (current.name !== requested) return;
-	identity = { token: current.token, name: granted };
+	if (current.requested !== requested) return;
+	identity = { token: current.token, requested: current.requested, granted };
 }
 
 export function onInstanceNameChanged(listener: (name: string) => void): () => void {

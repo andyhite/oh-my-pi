@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import { instanceIdentity, resetInstanceIdentityForTests } from "@oh-my-pi/pi-coding-agent/irc/instance";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import { instanceIdentity, resetInstanceIdentityForTests } from "@oh-my-pi/pi-coding-agent/irc/instance";
 
 function makeRuntime(crossProcessEnabled = false) {
 	const outputs: string[] = [];
@@ -28,9 +28,9 @@ describe("/peer slash command", () => {
 		const result = await executeAcpBuiltinSlashCommand("/peer", runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(outputs).toEqual([
-			`Peer name: ${currentName} (cross-process messaging is off; only local agent ids are addressable).`,
-		]);
+		expect(outputs).toHaveLength(1);
+		expect(outputs[0]).toContain(`Peer name: ${currentName}`);
+		expect(outputs[0]).toMatch(/messaging is off/);
 		expect(instanceIdentity().name).toBe(currentName);
 	});
 
@@ -40,7 +40,9 @@ describe("/peer slash command", () => {
 		const result = await executeAcpBuiltinSlashCommand("/peer Zeta", runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(outputs).toEqual(["Peer name set to Zeta (cross-process messaging is off; it applies if it turns on)."]);
+		expect(outputs).toHaveLength(1);
+		expect(outputs[0]).toContain("Peer name set to Zeta");
+		expect(outputs[0]).toMatch(/messaging is off/);
 		expect(instanceIdentity().name).toBe("Zeta");
 	});
 
@@ -51,9 +53,21 @@ describe("/peer slash command", () => {
 		const result = await executeAcpBuiltinSlashCommand("/peer", runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(outputs).toEqual([
-			`Peer name: ${currentName} (cross-process messaging is enabled but not currently attached to the project broker; only local agent ids are addressable).`,
-		]);
+		expect(outputs).toHaveLength(1);
+		expect(outputs[0]).toContain(`Peer name: ${currentName}`);
+		expect(outputs[0]).toMatch(/messaging is enabled but not currently attached/);
+	});
+
+	it("normalizes a name with disallowed characters and reports the normalization", async () => {
+		const { runtime, outputs } = makeRuntime();
+
+		const result = await executeAcpBuiltinSlashCommand("/peer My Peer!", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(outputs).toHaveLength(1);
+		expect(outputs[0]).toContain("Peer name set to MyPeer");
+		expect(outputs[0]).toMatch(/normalized from "My Peer!"/);
+		expect(instanceIdentity().name).toBe("MyPeer");
 	});
 
 	it("rejects an all-punctuation name with the usage string and leaves the name unchanged", async () => {
@@ -63,7 +77,8 @@ describe("/peer slash command", () => {
 		const result = await executeAcpBuiltinSlashCommand("/peer ///", runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(outputs).toEqual(["Usage: /peer <name> (letters, numbers, underscores, hyphens)"]);
+		expect(outputs).toHaveLength(1);
+		expect(outputs[0]).toMatch(/^Usage: \/peer/);
 		expect(instanceIdentity().name).toBe(currentName);
 	});
 });

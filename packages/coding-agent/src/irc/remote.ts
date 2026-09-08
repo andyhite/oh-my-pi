@@ -1,6 +1,6 @@
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { daemonClientForProject, type IrcAttachment } from "../launch/client";
+import { daemonBrokerIsListening, daemonClientForProject, type IrcAttachment } from "../launch/client";
 import type { IrcAgentRecord, IrcDeliveryOutcome, IrcIncomingNotification, IrcPeerRecord } from "../launch/protocol";
 import { AgentRegistry, type RemoteAgentPeer } from "../registry/agent-registry";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage, type IrcRemoteTransport } from "./bus";
@@ -26,8 +26,6 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 	readonly #attachment: IrcAttachment;
 	#syncTimer: NodeJS.Timeout | undefined;
 	#lastSyncAt = 0;
-	#inFlightSync: Promise<void> | undefined;
-	#queuedSync: Promise<void> | undefined;
 
 	constructor(registry: AgentRegistry, bus: IrcBus, attach: (bridge: IrcRemoteBridge) => IrcAttachment) {
 		this.#registry = registry;
@@ -91,13 +89,14 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 			},
 			{ expectsReply: notification.expectsReply },
 		);
+		if (receipt.outcome === "woken" || receipt.outcome === "revived") this.syncNow();
 		return { outcome: receipt.outcome, error: receipt.error };
 	}
 
 	async send(
 		message: IrcMessage,
 		target: { instance: string; id: string },
-		opts?: { expectsReply?: boolean },
+		opts?: { expectsReply?: boolean; ackTimeoutMs?: number },
 	): Promise<IrcDeliveryReceipt> {
 		const result = await this.#attachment.send(
 			{
@@ -109,7 +108,7 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 				replyTo: message.replyTo,
 				wakeRelay: message.wakeRelay,
 			},
-			{ expectsReply: opts?.expectsReply === true, timeoutMs: IRC_ACK_TIMEOUT_MS },
+			{ expectsReply: opts?.expectsReply === true, timeoutMs: opts?.ackTimeoutMs ?? IRC_ACK_TIMEOUT_MS },
 		);
 		return { to: qualifyIrcId(target.instance, target.id), outcome: result.outcome, error: result.error };
 	}
@@ -122,34 +121,13 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 		}
 	}
 
-	/**
-	 * Push name + roster and adopt the broker's grant. A call arriving while a
-	 * sync is in flight runs a fresh sync after it (never joining the stale
-	 * request), so a rename or roster change is never dropped; further calls
-	 * while one is queued collapse into that queued run.
-	 */
-	syncIdentity(): Promise<void> {
-		if (this.#queuedSync) return this.#queuedSync;
-		if (this.#inFlightSync) {
-			const queued = this.#inFlightSync.then(() => {
-				this.#queuedSync = undefined;
-				return this.syncIdentity();
-			});
-			this.#queuedSync = queued;
-			return queued;
-		}
-		const run = this.pushIdentity()
-			.catch(error => logger.debug("Cross-process IRC identity sync failed", { error }))
-			.finally(() => {
-				if (this.#inFlightSync === run) this.#inFlightSync = undefined;
-			});
-		this.#inFlightSync = run;
-		return run;
-	}
-
 	/** One `irc.sync` round-trip (the attachment adopts the grant); rejects when the broker is unreachable. */
 	async pushIdentity(): Promise<void> {
-		this.applyRoster((await this.#attachment.sync()).peers);
+		await this.#attachment.sync();
+	}
+
+	syncIdentity(): Promise<void> {
+		return this.pushIdentity().catch(error => logger.debug("Cross-process IRC identity sync failed", { error }));
 	}
 
 	/** Debounced trailing sync: coalesces bursts of local registry churn. */
@@ -188,8 +166,11 @@ export async function attachCrossProcessIrc(options: {
 	settings: Settings;
 	registry?: AgentRegistry;
 	bus?: IrcBus;
+	/** Whether attaching may spawn a broker when none is listening. Defaults to `true`. */
+	spawnBroker?: boolean;
 }): Promise<CrossProcessIrcHandle | null> {
 	if (options.settings.get("irc.crossProcess") === false) return null;
+	if (options.spawnBroker === false && !(await daemonBrokerIsListening(options.cwd))) return null;
 
 	const registry = options.registry ?? AgentRegistry.global();
 	const bus = options.bus ?? IrcBus.global();
@@ -200,7 +181,7 @@ export async function attachCrossProcessIrc(options: {
 		const bridge = new IrcRemoteBridge(registry, bus, self => {
 			attachment = client.attachIrc({
 				token: instanceIdentity().token,
-				requestedName: () => instanceIdentity().name,
+				requestedName: () => instanceIdentity().requested,
 				roster: () => IrcRemoteBridge.localRosterOf(registry),
 				nameGranted: adoptGrantedInstanceName,
 				incoming: notification => self.incoming(notification),

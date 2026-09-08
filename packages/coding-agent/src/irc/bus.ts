@@ -57,7 +57,7 @@ export interface IrcRemoteTransport {
 	send(
 		message: IrcMessage,
 		target: { instance: string; id: string },
-		opts?: { expectsReply?: boolean },
+		opts?: { expectsReply?: boolean; ackTimeoutMs?: number },
 	): Promise<IrcDeliveryReceipt>;
 	/** Pull a fresh scope roster into the registry overlay. Never throws. */
 	refresh(): Promise<void>;
@@ -87,6 +87,10 @@ export class IrcAwaitTargetStopped extends Error {
 
 /** Mailbox cap per agent; oldest messages are dropped beyond it. */
 const MAILBOX_CAP = 100;
+/** Ack window for a broadcast leg to a cross-process peer, short of the direct-send `IRC_ACK_TIMEOUT_MS`. */
+export const BROADCAST_REMOTE_ACK_TIMEOUT_MS = 2_000;
+/** Grace window for a remote `await` peer never observed running before treating it as stopped. */
+const REMOTE_AWAIT_LIVENESS_GRACE_MS = 10_000;
 
 export class IrcBus {
 	static #global: IrcBus | undefined;
@@ -177,7 +181,7 @@ export class IrcBus {
 	 */
 	async send(
 		msg: Omit<IrcMessage, "id" | "ts">,
-		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean; broadcast?: boolean },
 	): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		const target = resolvePeerTarget(this.#registry, message.to, this.#remote?.instance);
@@ -193,7 +197,10 @@ export class IrcBus {
 					const remoteReceipt = await this.#remote.send(
 						message,
 						{ instance: target.instance, id: target.localId },
-						opts,
+						{
+							expectsReply: opts?.expectsReply,
+							ackTimeoutMs: opts?.broadcast ? BROADCAST_REMOTE_ACK_TIMEOUT_MS : undefined,
+						},
 					);
 					receipt = { ...remoteReceipt, to: target.id };
 				} catch (error) {
@@ -461,8 +468,13 @@ export class IrcBus {
 			if (targetInstance !== undefined && targetInstance !== remoteInstance) {
 				// Remote peer: no local AgentSession to observe. Track liveness
 				// through the registry overlay instead, mirroring the local
-				// session-event path's "observed running, then stopped" gate.
+				// session-event path's "observed running, then stopped" gate. Roster
+				// pushes are debounced (100ms-2s); a peer that wakes and finishes
+				// inside that window is never sampled `live: true`, so a grace
+				// timer bounds the wait instead of leaving it live until a stop is
+				// actually observed.
 				let wasRunning = false;
+				const subscribedAt = Date.now();
 				const sync = (): void => {
 					const peer = registry.getRemotePeer(target);
 					if (!peer) {
@@ -473,11 +485,17 @@ export class IrcBus {
 						wasRunning = true;
 						return;
 					}
-					if (wasRunning) {
+					if (wasRunning || Date.now() - subscribedAt >= REMOTE_AWAIT_LIVENESS_GRACE_MS) {
 						settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
 					}
 				};
-				unsubscribeAwaitTarget = registry.onRemoteChange(sync);
+				const graceTimer = setTimeout(sync, REMOTE_AWAIT_LIVENESS_GRACE_MS + 50);
+				graceTimer.unref?.();
+				const unsubscribeRemote = registry.onRemoteChange(sync);
+				unsubscribeAwaitTarget = () => {
+					clearTimeout(graceTimer);
+					unsubscribeRemote();
+				};
 				sync();
 			} else {
 				let subscribedSession: AgentSession | null = null;

@@ -309,8 +309,10 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				return { outcome: result.outcome, error: result.error };
 			},
 			detach: async () => {
+				if (this.#irc === handlers) this.#irc = undefined;
+				const socket = this.#socket;
+				if (!socket || socket.destroyed) return;
 				await this.request({ op: "irc.detach", token: handlers.token }).catch(() => {});
-				this.#irc = undefined;
 			},
 		};
 	}
@@ -390,6 +392,15 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 		this.#completionReconnectTimer = setTimeout(() => {
 			this.#completionReconnectTimer = undefined;
+			if (
+				this.#closed ||
+				(this.#completionSinks.size === 0 &&
+					this.#irc === undefined &&
+					this.#completionUnsubscribes.size === 0 &&
+					this.#preservedCompletionOwners.size === 0)
+			) {
+				return;
+			}
 			this.#publishCompletionOwners();
 			this.#publishIrcAttachment();
 		}, CONNECT_RETRY_MS);
@@ -637,6 +648,18 @@ export async function createDaemonBrokerClient(
 export async function daemonClientForProject(projectDir: string): Promise<DaemonBrokerClient> {
 	const canonical = await canonicalProjectDir(projectDir);
 	return sharedDaemonClient(`project:${canonical}`, () => createDaemonBrokerClient(canonical));
+}
+
+/** Whether a broker for this scope is already listening. Never spawns one. */
+export async function daemonBrokerIsListening(projectDir: string, runtimeDir?: string): Promise<boolean> {
+	const canonical = await canonicalProjectDir(projectDir);
+	const endpoint = daemonBrokerEndpoint(canonical, runtimeDir ?? daemonRuntimeDir(canonical));
+	try {
+		(await openSocket(endpoint, 250)).destroy();
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /** Get the process-shared client that leases one profile-independent, machine-global daemon broker. */

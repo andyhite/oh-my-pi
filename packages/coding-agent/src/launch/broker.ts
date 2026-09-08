@@ -649,9 +649,8 @@ class DaemonBroker {
 	#resolveIrcName(
 		name: string,
 	): { token: string; entry: { socket: net.Socket; name: string; agents: Map<string, IrcAgentRecord> } } | undefined {
-		const target = name.toLowerCase();
 		for (const [token, entry] of this.#ircInstances) {
-			if (entry.name.toLowerCase() === target) return { token, entry };
+			if (entry.name === name) return { token, entry };
 		}
 		return undefined;
 	}
@@ -752,11 +751,7 @@ class DaemonBroker {
 		const source = this.#ircInstances.get(operation.token);
 		if (!source) throw new Error("Daemon broker irc token is not bound to this connection");
 		const claimed = parseIrcId(operation.message.from);
-		if (
-			claimed.instance === undefined ||
-			claimed.instance.toLowerCase() !== source.name.toLowerCase() ||
-			!source.agents.has(claimed.id)
-		) {
+		if (claimed.instance === undefined || claimed.instance !== source.name || !source.agents.has(claimed.id)) {
 			throw new Error(
 				`Daemon broker irc sender "${operation.message.from}" does not match a live agent advertised by this connection's instance.`,
 			);
