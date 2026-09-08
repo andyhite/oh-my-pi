@@ -512,8 +512,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const sanitized = sanitizeInstanceName(requested);
 			if (!sanitized) return usage("Usage: /peer <name> (letters, numbers, underscores, hyphens)", runtime);
 			setInstanceName(sanitized);
-			// Resolves once the bridge re-synced and adopted the broker's grant,
-			// immediately when no transport is attached.
+			// This is the only thing that pushes a rename to the broker; resolves
+			// once the bridge re-synced and adopted the grant, immediately when no
+			// transport is attached.
 			await IrcBus.global().syncRemoteIdentity();
 			const granted = instanceDisplayName();
 			const notes: string[] = [];

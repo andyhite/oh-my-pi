@@ -37,6 +37,7 @@ import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { IrcBus } from "../irc/bus";
+import { isQualifiedIrcId } from "../irc/identity";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
@@ -71,7 +72,7 @@ import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
-import { formatTaskResultSummary } from "./result-summary";
+import { formatWakeRelayBody } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
@@ -2492,12 +2493,14 @@ async function relayWakeTurnOutput(args: {
 		source => !bus.sentSince(args.id, source.from, args.turnStartTime),
 	);
 	if (pending.length === 0) return;
-	const body =
-		args.yielded && args.result.outputPath
-			? formatTaskResultSummary(args.result, { totalDurationMs: args.result.durationMs })
-			: args.turnText.trim();
-	if (!body) return;
 	for (const source of pending) {
+		const body = formatWakeRelayBody({
+			remote: isQualifiedIrcId(source.from),
+			yielded: args.yielded,
+			result: args.result,
+			turnText: args.turnText,
+		});
+		if (!body) continue;
 		const receipt = await bus.send({
 			from: args.id,
 			to: source.from,

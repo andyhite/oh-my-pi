@@ -19,6 +19,8 @@ const IRC_ACK_TIMEOUT_MS = 10_000;
 const SYNC_DEBOUNCE_MS = 100;
 /** Minimum gap between two roster pushes, so a burst of local activity coalesces. */
 const SYNC_MIN_INTERVAL_MS = 2_000;
+/** Ids logged once for containing the cross-process separator, so repeated syncs don't spam. */
+const warnedSeparatorIds = new Set<string>();
 
 /** Handle keeping this process attached to its scope's IRC registry. */
 export interface CrossProcessIrcHandle {
@@ -69,9 +71,15 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 			.list()
 			.filter(ref => {
 				if (ref.id.includes(IRC_ID_SEPARATOR)) {
-					logger.warn("Local agent id contains the cross-process separator; excluded from the advertised roster", {
-						id: ref.id,
-					});
+					if (!warnedSeparatorIds.has(ref.id)) {
+						warnedSeparatorIds.add(ref.id);
+						logger.warn(
+							"Local agent id contains the cross-process separator; excluded from the advertised roster",
+							{
+								id: ref.id,
+							},
+						);
+					}
 					return false;
 				}
 				return ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle");
@@ -129,11 +137,7 @@ class IrcRemoteBridge implements IrcRemoteTransport {
 	): Promise<IrcDeliveryReceipt> {
 		const instance = this.instance;
 		if (instance === undefined) {
-			return {
-				to: qualifyIrcId(target.instance, target.id),
-				outcome: "failed",
-				error: "This omp process has no broker-granted peer name yet; retry after `hub list`.",
-			};
+			throw new Error("Cross-process transport has no broker-granted peer name");
 		}
 		// The broker validates `from` against the last accepted roster; a sender
 		// registered inside the sync debounce window would be rejected. One extra
@@ -255,11 +259,9 @@ export async function attachCrossProcessIrc(options: {
 		bus.attachRemote(bridge);
 		setState({ attached: true });
 		const unsubscribeChange = registry.onChange(() => bridge.scheduleSync());
-		const unsubscribeName = identity.onChanged(() => bridge.syncNow());
 
 		const close = async (): Promise<void> => {
 			unsubscribeChange();
-			unsubscribeName();
 			bridge.dispose();
 			bus.detachRemote(bridge);
 			registry.setRemotePeers([]);

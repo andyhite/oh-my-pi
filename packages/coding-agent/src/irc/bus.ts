@@ -88,6 +88,10 @@ export class IrcAwaitTargetStopped extends Error {
 const MAILBOX_CAP = 100;
 /** Ack window for a broadcast leg to a cross-process peer, short of the direct-send `IRC_ACK_TIMEOUT_MS`. */
 export const BROADCAST_REMOTE_ACK_TIMEOUT_MS = 2_000;
+/** Cap on the roster refresh `hub list` waits for; a dead broker's respawn path must not block the caller. */
+export const LIST_ROSTER_REFRESH_TIMEOUT_MS = 500;
+/** Largest body handed to the cross-process transport; the broker drops a connection whose framed request exceeds 1 MiB. */
+export const MAX_REMOTE_MESSAGE_BODY_BYTES = 256 * 1024;
 /** Grace window for a remote `await` peer never observed running before treating it as stopped. */
 const REMOTE_AWAIT_LIVENESS_GRACE_MS = 10_000;
 
@@ -136,12 +140,22 @@ export class IrcBus {
 		return this.#remote?.instance;
 	}
 
-	/** Push the local roster + requested instance name. Never rejects. */
-	async syncRemoteIdentity(): Promise<void> {
+	/** Push the local roster + requested instance name. Never rejects. `timeoutMs` returns early while the push continues in the background. */
+	async syncRemoteIdentity(opts?: { timeoutMs?: number }): Promise<void> {
+		const remote = this.#remote;
+		if (!remote) return;
+		const guarded = Promise.resolve()
+			.then(() => remote.syncIdentity())
+			.catch(error => logger.debug("IrcBus: syncRemoteIdentity failed", { error: String(error) }));
+		const timeoutMs = opts?.timeoutMs;
+		if (timeoutMs === undefined) return guarded;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const timer = setTimeout(resolve, timeoutMs);
+		timer.unref?.();
 		try {
-			await this.#remote?.syncIdentity();
-		} catch (error) {
-			logger.debug("IrcBus: syncRemoteIdentity failed", { error: String(error) });
+			await Promise.race([guarded, promise]);
+		} finally {
+			clearTimeout(timer);
 		}
 	}
 
@@ -177,12 +191,19 @@ export class IrcBus {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		const target = resolvePeerTarget(this.#registry, message.to, this.#remote?.instance);
 		let receipt: IrcDeliveryReceipt;
+		const bodyBytes = Buffer.byteLength(message.body, "utf8");
 
 		if (target.kind === "local") {
 			receipt = await this.#deliverLocal({ ...message, to: target.id }, opts);
 		} else if (target.kind === "remote") {
 			if (!this.#remote) {
 				receipt = { to: target.id, outcome: "failed", error: `Agent "${target.id}" has no live session.` };
+			} else if (bodyBytes > MAX_REMOTE_MESSAGE_BODY_BYTES) {
+				receipt = {
+					to: target.id,
+					outcome: "failed",
+					error: `Message body is ${bodyBytes} bytes; cross-process delivery to "${target.id}" is capped at ${MAX_REMOTE_MESSAGE_BODY_BYTES} bytes. Write the payload to a file or local:// artifact and send the path instead.`,
+				};
 			} else {
 				try {
 					const remoteReceipt = await this.#remote.send(

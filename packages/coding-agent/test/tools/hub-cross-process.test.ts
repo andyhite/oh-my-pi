@@ -540,4 +540,58 @@ describe("cross-process hub messaging", () => {
 			expect(waited?.body).toBe("pong");
 		});
 	});
+
+	describe("bounded list refresh", () => {
+		it("returns well under the timeout window even when the transport's syncIdentity never settles", async () => {
+			const { transport } = makeTransport({
+				syncIdentity: () => new Promise<void>(() => {}),
+			});
+			bus.attachRemote(transport);
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+			registry.setRemotePeers([makeRemotePeer({ instance: "Other", localId: "Worker" })]);
+
+			const started = Date.now();
+			const result = await executeList(registry, "Main");
+			const elapsed = Date.now() - started;
+
+			expect(textOf(result)).toContain("Other/Worker");
+			expect(elapsed).toBeLessThan(2_000);
+		});
+	});
+
+	describe("remote message body cap", () => {
+		it("fails cleanly without calling the transport when a remote body exceeds the cap", async () => {
+			const { transport, sendCalls } = makeTransport();
+			bus.attachRemote(transport);
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+			registry.setRemotePeers([makeRemotePeer({ instance: "Other", localId: "Worker" })]);
+
+			const result = await executeSend(
+				{ registry, senderId: "Main", settings: Settings.isolated() },
+				{ to: "Other/Worker", message: "x".repeat(300_000) },
+			);
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("capped at 262144 bytes");
+			expect(sendCalls).toHaveLength(0);
+		});
+
+		it("does not cap an oversized body delivered to a local peer", async () => {
+			const { transport, sendCalls } = makeTransport();
+			bus.attachRemote(transport);
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+			const sub = makeFakeSession();
+			sub.setOutcome("injected");
+			registry.register({ id: "Sub", displayName: "task", kind: "sub", session: sub.session });
+
+			const result = await executeSend(
+				{ registry, senderId: "Main", settings: Settings.isolated() },
+				{ to: "Sub", message: "x".repeat(300_000) },
+			);
+
+			expect(sendCalls).toHaveLength(0);
+			expect(result.isError).toBeFalsy();
+			expect(textOf(result)).toContain("Sub: injected");
+		});
+	});
 });

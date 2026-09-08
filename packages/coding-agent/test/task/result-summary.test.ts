@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-summary";
+import { formatTaskResultSummary, formatWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 
 function settledResult(output: string): SingleResult {
@@ -59,5 +59,36 @@ describe("formatTaskResultSummary", () => {
 		});
 		expect(summary).toContain("<output>\ndone\n</output>");
 		expect(summary).not.toContain("<preview");
+	});
+});
+
+describe("formatWakeRelayBody", () => {
+	it("gives a remote waker an inline output preview instead of an unresolvable agent:// pointer", () => {
+		const lines = Array.from({ length: 400 }, (_, i) => `- item ${i} ${"x".repeat(20)}`);
+		const output = lines.join("\n");
+		const body = formatWakeRelayBody({ remote: true, yielded: true, result: settledResult(output), turnText: "" });
+
+		expect(body).toContain(lines[0] as string);
+		expect(body).not.toContain("agent://Scout");
+		expect(body).toContain("[Output truncated at");
+	});
+
+	it("keeps the agent:// pointer for a local waker", () => {
+		const lines = Array.from({ length: 400 }, (_, i) => `- item ${i} ${"x".repeat(20)}`);
+		const output = lines.join("\n");
+		const body = formatWakeRelayBody({ remote: false, yielded: true, result: settledResult(output), turnText: "" });
+
+		expect(body).toContain("agent://Scout");
+	});
+
+	it("falls back to the trimmed turn text when the turn did not yield", () => {
+		const body = formatWakeRelayBody({
+			remote: true,
+			yielded: false,
+			result: settledResult("irrelevant"),
+			turnText: " hi ",
+		});
+
+		expect(body).toBe("hi");
 	});
 });

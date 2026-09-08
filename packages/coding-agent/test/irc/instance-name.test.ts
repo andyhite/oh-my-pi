@@ -4,7 +4,6 @@ import {
 	initInstanceName,
 	instanceDisplayName,
 	instanceIdentity,
-	onInstanceNameChanged,
 	resetInstanceIdentityForTests,
 	sanitizeInstanceName,
 	setInstanceName,
@@ -38,37 +37,6 @@ describe("instance identity", () => {
 		setInstanceName("Beta");
 
 		expect(instanceIdentity().token).toBe(tokenAfterInit);
-	});
-
-	it("notifies listeners exactly once per real name change", () => {
-		initInstanceName("Alpha");
-		const seen: string[] = [];
-		onInstanceNameChanged(name => seen.push(name));
-
-		setInstanceName("Beta");
-
-		expect(seen).toEqual(["Beta"]);
-	});
-
-	it("does not notify listeners when the sanitized name is unchanged", () => {
-		initInstanceName("Alpha");
-		const seen: string[] = [];
-		onInstanceNameChanged(name => seen.push(name));
-
-		setInstanceName("Alpha");
-
-		expect(seen).toEqual([]);
-	});
-
-	it("adopts a granted name without notifying listeners", () => {
-		initInstanceName("Alpha");
-		const seen: string[] = [];
-		onInstanceNameChanged(name => seen.push(name));
-
-		adoptGrantedInstanceName("Alpha", "Alpha-2");
-
-		expect(seen).toEqual([]);
-		expect(instanceDisplayName()).toBe("Alpha-2");
 	});
 
 	it("ignores a grant for a name that was replaced while the request was in flight", () => {

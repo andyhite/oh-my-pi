@@ -75,3 +75,22 @@ export function formatTaskResultSummary(
 		mergeSummary: options.mergeSummary ?? "",
 	});
 }
+
+/**
+ * Body for one wake-turn relay leg. `agent://` pointers resolve only inside the process that
+ * owns the transcript, so a cross-process waker gets the output preview inline instead of a
+ * link it cannot follow.
+ */
+export function formatWakeRelayBody(args: {
+	remote: boolean;
+	yielded: boolean;
+	result: SingleResult;
+	turnText: string;
+}): string {
+	if (!args.yielded || !args.result.outputPath) return args.turnText.trim();
+	if (!args.remote) return formatTaskResultSummary(args.result, { totalDurationMs: args.result.durationMs });
+	const output = formatResultOutputFallback(args.result);
+	const preview = previewHead(output);
+	if (preview.length >= output.length) return preview;
+	return `${preview}\n\n[Output truncated at ${preview.length} of ${output.length} chars — reply to ask for specifics.]`;
+}

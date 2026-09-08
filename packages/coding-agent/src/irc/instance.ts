@@ -19,17 +19,6 @@ interface MutableIdentity {
 }
 
 let identity: MutableIdentity | undefined;
-const listeners = new Set<(name: string) => void>();
-
-function notify(name: string): void {
-	for (const listener of listeners) {
-		try {
-			listener(name);
-		} catch {
-			// Listener failures must not break identity mutation.
-		}
-	}
-}
 
 /** Lazily created; `token` is a `crypto.randomUUID()`, `requested` a generated pair. */
 export function instanceIdentity(): InstanceIdentity {
@@ -63,7 +52,7 @@ export function initInstanceName(requested?: string): string {
 	return name;
 }
 
-/** Sanitize and apply a new name; notifies listeners so an attached bridge re-syncs. Throws when nothing survives sanitizing. */
+/** Sanitize and apply a new name; an attached bridge re-syncs on its own next tick. Throws when nothing survives sanitizing. */
 export function setInstanceName(requested: string): string {
 	const sanitized = sanitizeInstanceName(requested);
 	if (sanitized === undefined) {
@@ -74,7 +63,6 @@ export function setInstanceName(requested: string): string {
 	// Routing continues under the still-valid old grant for the duration of
 	// the sync that follows this rename.
 	identity = { token: current.token, requested: sanitized, granted: current.granted };
-	notify(sanitized);
 	return sanitized;
 }
 
@@ -92,17 +80,9 @@ export function adoptGrantedInstanceName(requested: string, granted: string): vo
 	identity = { token: current.token, requested: granted, granted };
 }
 
-export function onInstanceNameChanged(listener: (name: string) => void): () => void {
-	listeners.add(listener);
-	return () => {
-		listeners.delete(listener);
-	};
-}
-
 /** Reset the instance identity. Test-only. */
 export function resetInstanceIdentityForTests(): void {
 	identity = undefined;
-	listeners.clear();
 }
 
 /** The name/token state one cross-process attachment addresses itself with. */
@@ -111,8 +91,6 @@ export interface InstanceIdentityStore {
 	requested(): string;
 	granted(): string | undefined;
 	adoptGranted(requested: string, granted: string): void;
-	/** Fires when the local name changes; a secondary identity never renames. */
-	onChanged(listener: (name: string) => void): () => void;
 }
 
 /** Process-wide identity backing `--name`, `/peer`, and the default attachment. */
@@ -121,7 +99,6 @@ export const processInstanceIdentity: InstanceIdentityStore = {
 	requested: () => instanceIdentity().requested,
 	granted: () => instanceIdentity().granted,
 	adoptGranted: adoptGrantedInstanceName,
-	onChanged: onInstanceNameChanged,
 };
 
 /** Independent identity for a second in-process attachment (tests, embedding). */
@@ -139,6 +116,5 @@ export function createInstanceIdentity(requested: string): InstanceIdentityStore
 			if (state.requested !== req) return;
 			state = { token: state.token, requested: granted, granted };
 		},
-		onChanged: () => () => {},
 	};
 }

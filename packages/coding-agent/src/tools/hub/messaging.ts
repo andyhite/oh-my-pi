@@ -14,7 +14,13 @@ import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatAge, formatDuration } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
-import { IrcAwaitTargetStopped, IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
+import {
+	IrcAwaitTargetStopped,
+	IrcBus,
+	LIST_ROSTER_REFRESH_TIMEOUT_MS,
+	type IrcDeliveryReceipt,
+	type IrcMessage,
+} from "../../irc/bus";
 import { ambiguousPeerError, resolvePeerTarget } from "../../irc/identity";
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -180,8 +186,10 @@ export async function executeList(
 	// it also forces a reconnect if the socket died. A dedicated pull would
 	// race a slower `.then` against a newer `irc-roster` push from the same
 	// data chunk (see client.ts `#publishIrcAttachment`), so there is no
-	// separate refresh op to call here.
-	await bus.syncRemoteIdentity();
+	// separate refresh op to call here. The refresh is capped because a dead
+	// broker's respawn path inside `#connectOnce` would otherwise block this
+	// call, and `irc-roster` pushes keep the overlay authoritative anyway.
+	await bus.syncRemoteIdentity({ timeoutMs: LIST_ROSTER_REFRESH_TIMEOUT_MS });
 	// Overlay rows are cross-process peers; a parked-status query is local-only
 	// (remote peers are never advertised as parked).
 	const remotePeers =
@@ -209,7 +217,7 @@ export async function executeList(
 	const shownRemotePeers = shown.filter(row => row.remote);
 
 	const counts: HubRosterCounts = {
-		...countAddressable([...refs.filter(ref => isAddressablePeer(ref, senderId)), ...remotePeers]),
+		...countAddressable([...refs, ...remotePeers]),
 		shown: shown.length,
 		truncated,
 		remote: remotePeers.length,
